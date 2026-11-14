@@ -13,12 +13,18 @@
     padding: 0;
     height: 100%;
     width: 100%;
+    min-width: 320px;
     background-color: #060913;
     color: #e2e8f0;
     font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     overflow: hidden;
     user-select: none;
     -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+
+  *, *::before, *::after {
+    box-sizing: border-box;
   }
 
   code, pre, .font-mono {
@@ -28,6 +34,7 @@
   #root {
     height: 100dvh;
     width: 100vw;
+    min-width: 320px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -60,4 +67,59 @@
 
 .safe-bottom {
   padding-bottom: max(var(--sab), 0.5rem);
+}
+
+/* Shared compact phone layout: keep the browser home readable at narrow widths. */
+@media (max-width: 480px) {
+  #root header {
+    padding-left: max(0.5rem, var(--sal));
+    padding-right: max(0.5rem, var(--sar));
+  }
+
+  #root header > div,
+  #root header .flex {
+    min-width: 0;
+  }
+
+  #root header h1,
+  #root header span {
+    min-width: 0;
+  }
+
+  /* Shortcut names wrap instead of being clipped to a short fixed label width. */
+  #root .grid.grid-cols-4 > div > span {
+    display: block;
+    width: 100%;
+    max-width: none;
+    min-height: 2.5em;
+    padding-inline: 2px;
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.25;
+    text-align: center;
+  }
+
+  /* Respect display cutouts while preserving the same shared website UI. */
+  #root main,
+  #root > div {
+    padding-left: max(0px, var(--sal));
+    padding-right: max(0px, var(--sar));
+  }
+}
+
+@media (max-width: 360px) {
+  #root .grid.grid-cols-4 {
+    column-gap: 0.25rem;
+  }
+
+  #root .grid.grid-cols-4 > div > button {
+    width: 2.9rem;
+    height: 2.9rem;
+  }
+
+  #root .grid.grid-cols-4 > div > button > div {
+    width: 2.25rem;
+    height: 2.25rem;
+  }
 }
