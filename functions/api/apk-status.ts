@@ -39,23 +39,25 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     } catch {}
   }
 
+  const DEFAULT_PUBLIC_REPO = 'omarvio-live/omarviobrowser';
   const envApkUrl = (env.OMARVIO_APK_URL || manifestApkUrl || '').trim();
-  const envRepo = (env.OMARVIO_GITHUB_REPO || kvRepo || manifestRepo || '')
+  const envRepo = (env.OMARVIO_GITHUB_REPO || kvRepo || manifestRepo || DEFAULT_PUBLIC_REPO)
     .trim()
     .replace(/^https?:\/\/github\.com\//i, '')
     .replace(/\.git$/i, '')
     .replace(/\/+$/, '');
   const githubReleaseUrl =
-    envApkUrl || (envRepo ? `https://github.com/${envRepo}/releases/latest/download/omarvio-browser.apk` : '');
+    envApkUrl || `https://github.com/${envRepo}/releases/latest/download/omarvio-browser.apk`;
 
   return new Response(
     JSON.stringify({
       hasLocalBinary: false,
-      directApkUrl: githubReleaseUrl || null,
-      githubRepo: envRepo || null,
+      directApkUrl: githubReleaseUrl,
+      githubRepo: envRepo,
       workflowFile: '.github/workflows/build-apk.yml',
       packageName: 'com.omarvio.browser',
-      version: '2.0.0',
+      version: '2.0.0.4',
+      sha256: '71ab9e0fe1b43e3c20bcf92d1bd6e4c95dce6969584d2dbdf4c04433866fd766',
     }),
     {
       headers: {

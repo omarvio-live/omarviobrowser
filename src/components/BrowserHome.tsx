@@ -404,7 +404,7 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
 
   return (
     <div className="w-full h-full overflow-y-auto bg-gradient-to-b from-[#0b1021] via-[#080d1a] to-[#04060d] text-white scrollbar-none touch-manipulation">
-      <div className="relative w-full min-h-full flex flex-col items-center justify-start px-4 pt-10 sm:pt-14 pb-24 max-w-lg mx-auto">
+      <div className="relative w-full min-h-full flex flex-col items-center justify-start px-4 pt-7 sm:pt-12 pb-20 max-w-lg mx-auto">
         {/* Glow ambient background sphere */}
         <div className="absolute top-10 left-1/2 -translate-x-1/2 w-72 h-72 bg-blue-600/10 rounded-full blur-3xl pointer-events-none -z-0" />
 
@@ -417,17 +417,12 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
             alt="OMARVIO BROWSER Logo"
             decoding="sync"
             fetchPriority="high"
-            className="w-20 h-20 sm:w-24 sm:h-24 aspect-square rounded-2xl object-contain bg-black shadow-2xl shadow-cyan-950/50 mb-3"
+            className="w-20 h-20 aspect-square rounded-2xl object-contain bg-black shadow-2xl shadow-cyan-950/50 mb-3"
           />
-          <div className="flex items-center gap-1.5 mb-1">
-            <span className="text-3xl sm:text-4xl font-black tracking-tight bg-gradient-to-r from-blue-400 via-cyan-300 to-indigo-300 bg-clip-text text-transparent drop-shadow-md">
-              OMARVIO BROWSER
-            </span>
-          </div>
-          <p className="text-[11px] font-bold tracking-[0.22em] text-cyan-400/90 uppercase mb-1">
-            CHROMIUM PRIVATE BROWSER
-          </p>
-          <p className="text-xs font-semibold text-cyan-200/80 italic">
+          <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight bg-gradient-to-r from-blue-400 via-cyan-300 to-indigo-300 bg-clip-text text-transparent mb-1">
+            OMARVIO BROWSER
+          </h1>
+          <p className="text-xs font-medium text-slate-400">
             &ldquo;আমার ফোন, আমার ডেটা – কাউকে দেব না!&rdquo;
           </p>
         </div>
@@ -614,46 +609,36 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
         {/* ============================================================== */}
         {/* 5. NATIVE ANDROID APK DOWNLOAD HUB & PWA COMPACT CARD          */}
         {/* ============================================================== */}
-        <div className="w-full p-3.5 rounded-2xl bg-gradient-to-r from-emerald-950/30 via-slate-900/40 to-cyan-950/30 border border-emerald-500/30 flex items-center justify-between text-xs backdrop-blur-xs mb-4 relative z-10 shadow-lg">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-9 h-9 rounded-full bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-300 shrink-0 shadow-sm">
+        <div className="w-full p-4 rounded-2xl bg-slate-900/60 border border-slate-800 flex items-center justify-between gap-3 mb-4 relative z-10 shadow-sm">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
               <Download className="w-4 h-4" />
             </div>
             <div className="min-w-0">
-              <p className="font-bold text-slate-100 text-xs flex items-center gap-1.5">
-                <span>অ্যান্ড্রয়েড APK (v2.0.0)</span>
-                <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-400/30">
-                  Native
-                </span>
+              <p className="font-semibold text-slate-100 text-xs sm:text-sm truncate">
+                অ্যান্ড্রয়েড নেটিভ APK
               </p>
-              <p className="text-[10px] text-slate-400 truncate">
-                সরাসরি ফোনে ইনস্টল • ১০০% ক্রোমিয়াম ইঞ্জিন
+              <p className="text-[11px] text-slate-400 truncate">
+                v2.0.0.4 · ১০.৬ MB · সরাসরি ফোনে ইনস্টলযোগ্য
               </p>
             </div>
           </div>
           <a
-            href={(() => {
-              if (typeof window !== 'undefined') {
-                const repo = (localStorage.getItem('omarvio_github_repo') || '').trim();
-                if (repo && repo.includes('/')) {
-                  return `https://github.com/${repo}/releases/latest/download/omarvio-browser.apk`;
-                }
-              }
-              return '/api/download-apk';
-            })()}
+            href="/api/download-apk"
             target="_blank"
             rel="noopener noreferrer"
-            className="px-3.5 py-1.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1 transition-all active:scale-95 shadow-md shadow-emerald-950 shrink-0 cursor-pointer"
+            className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-all active:scale-95 shrink-0 cursor-pointer whitespace-nowrap"
           >
-            <span>APK</span>
+            <Download className="w-3.5 h-3.5" />
+            <span>ডাউনলোড</span>
           </a>
         </div>
 
         {/* ============================================================== */}
-        {/* 6. SUBTLE FOOTER TRUST BADGE                                   */}
+        {/* 6. SUBTLE FOOTER TRUST CAPTION                                 */}
         {/* ============================================================== */}
         <div className="flex items-center gap-1.5 text-[11px] text-slate-400 select-none">
-          <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
+          <ShieldCheck className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
           <span>১০০% বিজ্ঞাপন ও ট্র্যাকারমুক্ত · রিয়েল ক্রোমিয়াম ইঞ্জিন</span>
         </div>
       </div>

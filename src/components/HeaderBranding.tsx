@@ -16,7 +16,7 @@ export const HeaderBranding: React.FC<HeaderBrandingProps> = ({ compact = false 
   if (compact) {
     return (
       <div
-        className="flex items-center gap-2 select-none"
+        className="flex items-center gap-2.5 select-none"
         title="OMARVIO BROWSER"
       >
         <img
@@ -24,19 +24,9 @@ export const HeaderBranding: React.FC<HeaderBrandingProps> = ({ compact = false 
           alt="OMARVIO BROWSER Logo"
           className="w-8 h-8 aspect-square rounded-lg shadow-sm object-contain bg-black shrink-0"
         />
-        <div className="flex flex-col">
-          <div className="flex items-center gap-1.5 leading-none">
-            <span className="font-bold text-sm tracking-wide bg-gradient-to-r from-blue-400 via-cyan-300 to-indigo-300 bg-clip-text text-transparent">
-              OMARVIO
-            </span>
-            <span className="text-[10px] text-cyan-400 font-semibold tracking-wider">
-              BROWSER
-            </span>
-          </div>
-          <span className="text-[9px] text-cyan-300/80 font-medium tracking-tight truncate max-w-[210px] sm:max-w-none italic">
-            &ldquo;My Phone, My Data – Why Surrender It To Others!&rdquo;
-          </span>
-        </div>
+        <span className="font-bold text-sm tracking-wide whitespace-nowrap shrink-0 bg-gradient-to-r from-blue-400 via-cyan-300 to-indigo-300 bg-clip-text text-transparent">
+          OMARVIO BROWSER
+        </span>
       </div>
     );
   }

@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -22,9 +23,11 @@ import android.webkit.WebView
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
@@ -36,6 +39,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -50,9 +54,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -89,7 +95,13 @@ class MainActivity : ComponentActivity() {
     private var externalIntentUrlState = mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val navBarDarkColor = AndroidColor.parseColor("#0B1329")
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(navBarDarkColor),
+            navigationBarStyle = SystemBarStyle.dark(navBarDarkColor)
+        )
         super.onCreate(savedInstanceState)
+
         // Explicitly enable hardware acceleration on Window level for 60fps PWA & Chromium rendering
         window.setFlags(
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
@@ -172,7 +184,6 @@ class MainActivity : ComponentActivity() {
 }
 
 @SuppressLint("SetJavaScriptEnabled")
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OmarVioBrowserApp(
     externalLaunchUrl: String?,
@@ -186,7 +197,8 @@ fun OmarVioBrowserApp(
     var isHomeVisible by remember { mutableStateOf(externalLaunchUrl == null) }
     var currentUrl by remember { mutableStateOf(externalLaunchUrl ?: "") }
     var inputUrl by remember { mutableStateOf(externalLaunchUrl ?: "") }
-    var pageTitle by remember { mutableStateOf("OMARVIO Browser") }
+    var homeSearchText by remember { mutableStateOf("") }
+    var pageTitle by remember { mutableStateOf("OMARVIO BROWSER") }
     var isLoading by remember { mutableStateOf(false) }
     var canGoBack by remember { mutableStateOf(false) }
     var canGoForward by remember { mutableStateOf(false) }
@@ -266,6 +278,7 @@ fun OmarVioBrowserApp(
         onHomeVisibilityChanged(false)
         currentUrl = target
         inputUrl = target
+        homeSearchText = ""
         internalWebView?.loadUrl(target)
     }
 
@@ -273,6 +286,16 @@ fun OmarVioBrowserApp(
         isHomeVisible = true
         onHomeVisibilityChanged(true)
         inputUrl = ""
+    }
+
+    fun toggleDesktopMode() {
+        isDesktopMode = !isDesktopMode
+        internalWebView?.let { wv ->
+            wv.settings.userAgentString = if (isDesktopMode) DESKTOP_USER_AGENT else MOBILE_USER_AGENT
+            wv.settings.useWideViewPort = true
+            wv.settings.loadWithOverviewMode = true
+            if (!isHomeVisible) wv.reload()
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -309,115 +332,179 @@ fun OmarVioBrowserApp(
     }
 
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF070913))) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            // Top Chrome-style Omnibox Header
+        Column(modifier = Modifier.fillMaxSize().imePadding()) {
+            // Top Chrome-style Slim Header with explicit statusBarsPadding so Android status bar never overlaps
             Surface(color = Color(0xFF0B1329), modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    if (isHomeVisible) {
+                        // Clean single-row home header
                         Row(
+                            modifier = Modifier.fillMaxWidth().height(40.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.clickable { goToHome() }
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Image(
-                                painter = painterResource(id = R.drawable.omarvio_logo),
-                                contentDescription = "OMARVIO BROWSER",
-                                contentScale = ContentScale.Fit,
-                                modifier = Modifier
-                                    .size(30.dp)
-                                    .clip(RoundedCornerShape(7.dp))
-                                    .background(Color.Black)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("OMARVIO BROWSER", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            // Desktop Mode Quick Toggle
-                            Text(
-                                text = if (isDesktopMode) "🖥️ Desktop" else "📱 Mobile",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (isDesktopMode) Color(0xFF38BDF8) else Color(0xFF94A3B8),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(Color(0xFF131728))
-                                    .clickable {
-                                        isDesktopMode = !isDesktopMode
-                                        internalWebView?.let { wv ->
-                                            wv.settings.userAgentString =
-                                                if (isDesktopMode) DESKTOP_USER_AGENT else MOBILE_USER_AGENT
-                                            wv.settings.useWideViewPort = true
-                                            wv.settings.loadWithOverviewMode = true
-                                            if (!isHomeVisible) wv.reload()
-                                        }
-                                    }
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.omarvio_logo),
+                                    contentDescription = "OMARVIO BROWSER",
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color.Black)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "OMARVIO BROWSER",
+                                    color = Color(0xFFF1F5F9),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    maxLines = 1
+                                )
+                            }
 
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.clip(RoundedCornerShape(12.dp))
-                                    .background(Color(0xFF064E3B).copy(alpha = 0.5f))
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Icon(Icons.Default.Shield, contentDescription = "Shield", tint = Color(0xFF10B981), modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("$blockedCount ব্লকড", color = Color(0xFF34D399), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color(0xFF131B2E))
+                                        .clickable { toggleDesktopMode() }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isDesktopMode) Icons.Default.Laptop else Icons.Default.Smartphone,
+                                        contentDescription = "Mode",
+                                        tint = if (isDesktopMode) Color(0xFF38BDF8) else Color(0xFF94A3B8),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text(
+                                        text = if (isDesktopMode) "Desktop" else "Mobile",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (isDesktopMode) Color(0xFF38BDF8) else Color(0xFFCBD5E1)
+                                    )
+                                }
+
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        Icons.Default.Shield,
+                                        contentDescription = "AdBlock",
+                                        tint = Color(0xFF10B981),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "$blockedCount ব্লকড",
+                                        color = Color(0xFF34D399),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
                         }
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    // Unified Smart Omnibox
-                    Row(
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp))
-                            .background(Color(0xFF131728)).padding(horizontal = 10.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            if (!isHomeVisible && currentUrl.startsWith("https")) Icons.Default.Lock else Icons.Default.Search,
-                            contentDescription = "Status",
-                            tint = if (!isHomeVisible && currentUrl.startsWith("https")) Color(0xFF10B981) else Color(0xFF94A3B8),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        TextField(
-                            value = inputUrl,
-                            onValueChange = { inputUrl = it },
-                            placeholder = {
-                                Text("সার্চ বা ওয়েব ঠিকানা লিখুন...", fontSize = 13.sp, color = Color(0xFF64748B))
-                            },
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent,
-                                focusedIndicatorColor = Color.Transparent,
-                                unfocusedIndicatorColor = Color.Transparent,
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White
-                            ),
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                            keyboardActions = KeyboardActions(onGo = { navigateToUrl(inputUrl) }),
-                            modifier = Modifier.weight(1f)
-                        )
-                        if (inputUrl.isNotEmpty()) {
-                            IconButton(onClick = { inputUrl = "" }, modifier = Modifier.size(24.dp)) {
-                                Icon(Icons.Default.Close, contentDescription = "Clear", tint = Color(0xFF64748B), modifier = Modifier.size(14.dp))
+                    } else {
+                        // Active Webpage 1-Row Slim Omnibox Bar
+                        Row(
+                            modifier = Modifier.fillMaxWidth().height(44.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            IconButton(
+                                onClick = { goToHome() },
+                                modifier = Modifier.size(38.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Home,
+                                    contentDescription = "Home",
+                                    tint = Color(0xFF38BDF8),
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
-                        }
-                        if (isLoading && !isHomeVisible) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color(0xFF06B6D4))
-                        } else if (!isHomeVisible) {
-                            IconButton(onClick = { internalWebView?.reload() }, modifier = Modifier.size(24.dp)) {
-                                Icon(Icons.Default.Refresh, contentDescription = "Reload", tint = Color(0xFF94A3B8), modifier = Modifier.size(16.dp))
+
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(40.dp)
+                                    .clip(RoundedCornerShape(20.dp))
+                                    .background(Color(0xFF131B2E))
+                                    .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(20.dp))
+                                    .padding(horizontal = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    if (currentUrl.startsWith("https")) Icons.Default.Lock else Icons.Default.Search,
+                                    contentDescription = "Security",
+                                    tint = if (currentUrl.startsWith("https")) Color(0xFF10B981) else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                BasicTextField(
+                                    value = inputUrl,
+                                    onValueChange = { inputUrl = it },
+                                    singleLine = true,
+                                    textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+                                    cursorBrush = SolidColor(Color(0xFF22D3EE)),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                                    keyboardActions = KeyboardActions(onGo = { navigateToUrl(inputUrl) }),
+                                    modifier = Modifier.weight(1f),
+                                    decorationBox = { innerTextField ->
+                                        if (inputUrl.isEmpty()) {
+                                            Text(
+                                                "সার্চ বা ওয়েব ঠিকানা লিখুন...",
+                                                color = Color(0xFF64748B),
+                                                fontSize = 13.sp,
+                                                maxLines = 1
+                                            )
+                                        }
+                                        innerTextField()
+                                    }
+                                )
+                                if (inputUrl.isNotEmpty()) {
+                                    IconButton(
+                                        onClick = { inputUrl = "" },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Close,
+                                            contentDescription = "Clear",
+                                            tint = Color(0xFF94A3B8),
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                }
+                                IconButton(
+                                    onClick = { internalWebView?.reload() },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Refresh,
+                                        contentDescription = "Reload",
+                                        tint = if (isLoading) Color(0xFF22D3EE) else Color(0xFFCBD5E1),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+
+                            IconButton(
+                                onClick = { toggleDesktopMode() },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isDesktopMode) Icons.Default.Laptop else Icons.Default.Smartphone,
+                                    contentDescription = "Toggle Desktop Mode",
+                                    tint = if (isDesktopMode) Color(0xFF38BDF8) else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(19.dp)
+                                )
                             }
                         }
                     }
@@ -432,7 +519,7 @@ fun OmarVioBrowserApp(
                 )
             }
 
-            // Main Content Area: Native Chromium WebView + Optional Home Overlay
+            // Main Content Area: Native Chromium WebView + Clean User-Friendly Home Overlay
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
@@ -548,55 +635,129 @@ fun OmarVioBrowserApp(
                     }
                 )
 
-                // Sleek Native OmarVio Home Screen (100% Chromium Direct Launch for All 8 Sites)
+                // Clean, Airy, Light Native Home Screen
                 if (isHomeVisible) {
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .background(
                                 Brush.verticalGradient(
-                                    listOf(Color(0xFF0B1021), Color(0xFF080D1A), Color(0xFF04060D))
+                                    listOf(Color(0xFF0A0F1F), Color(0xFF070B16), Color(0xFF050811))
                                 )
                             )
                             .verticalScroll(rememberScrollState())
                             .padding(horizontal = 20.dp, vertical = 28.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
+                        Spacer(modifier = Modifier.height(8.dp))
+
                         Image(
                             painter = painterResource(id = R.drawable.omarvio_logo),
                             contentDescription = "OMARVIO BROWSER Logo",
                             contentScale = ContentScale.Fit,
                             modifier = Modifier
-                                .size(92.dp)
+                                .size(82.dp)
                                 .clip(RoundedCornerShape(18.dp))
                                 .background(Color.Black)
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
                         Text(
                             text = "OMARVIO BROWSER",
-                            fontSize = 28.sp,
-                            fontWeight = FontWeight.Black,
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.ExtraBold,
                             color = Color(0xFF38BDF8),
-                            letterSpacing = 1.sp,
+                            letterSpacing = 0.6.sp,
                             textAlign = TextAlign.Center
                         )
-                        Text(
-                            text = "NATIVE CHROMIUM PRIVATE BROWSER",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF06B6D4),
-                            letterSpacing = 1.8.sp
-                        )
+
                         Spacer(modifier = Modifier.height(4.dp))
+
                         Text(
                             text = "\"আমার ফোন, আমার ডেটা – কাউকে দেব না!\"",
                             fontSize = 12.sp,
-                            color = Color(0xFFA5F3FC)
+                            color = Color(0xFF94A3B8),
+                            textAlign = TextAlign.Center
                         )
 
                         Spacer(modifier = Modifier.height(22.dp))
 
-                        // Search Engine Selector Pills
+                        // Friendly High-Contrast Unified Search & URL Box right on Home
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                                .clip(RoundedCornerShape(26.dp))
+                                .background(Color.White)
+                                .padding(start = 16.dp, end = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Search,
+                                contentDescription = "Search",
+                                tint = Color(0xFF475569),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            BasicTextField(
+                                value = homeSearchText,
+                                onValueChange = { homeSearchText = it },
+                                singleLine = true,
+                                textStyle = TextStyle(
+                                    color = Color(0xFF0F172A),
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium
+                                ),
+                                cursorBrush = SolidColor(Color(0xFF0284C7)),
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                keyboardActions = KeyboardActions(onSearch = { navigateToUrl(homeSearchText) }),
+                                modifier = Modifier.weight(1f),
+                                decorationBox = { innerTextField ->
+                                    if (homeSearchText.isEmpty()) {
+                                        Text(
+                                            text = "সার্চ বা ওয়েব ঠিকানা লিখুন...",
+                                            color = Color(0xFF94A3B8),
+                                            fontSize = 14.sp,
+                                            maxLines = 1
+                                        )
+                                    }
+                                    innerTextField()
+                                }
+                            )
+                            if (homeSearchText.isNotEmpty()) {
+                                IconButton(
+                                    onClick = { homeSearchText = "" },
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "Clear",
+                                        tint = Color(0xFF64748B),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF0284C7))
+                                    .clickable { navigateToUrl(homeSearchText) },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = "Go",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        // Search Engine Selector Tabs
                         Row(
                             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -609,26 +770,26 @@ fun OmarVioBrowserApp(
                                     fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                                     color = if (active) Color(0xFF040817) else Color(0xFFCBD5E1),
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(16.dp))
+                                        .clip(RoundedCornerShape(10.dp))
                                         .background(if (active) Color(0xFF22D3EE) else Color(0xFF131B2E))
                                         .clickable { selectedEngineId = eng.id }
-                                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                                        .padding(horizontal = 13.dp, vertical = 8.dp)
                                 )
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(24.dp))
+                        Spacer(modifier = Modifier.height(26.dp))
 
                         Text(
-                            text = "শীর্ষ ওয়েবসাইট (সরাসরি ক্রোমিয়াম ইঞ্জিন - ১০০% লোড)",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
+                            text = "জনপ্রিয় ওয়েবসাইট",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
                             color = Color(0xFF94A3B8),
                             modifier = Modifier.fillMaxWidth()
                         )
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        // 4-Column Grid of Direct Websites
+                        // Clean 4-Column Shortcut Grid
                         for (rowIndex in 0..1) {
                             Row(
                                 modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp),
@@ -646,8 +807,8 @@ fun OmarVioBrowserApp(
                                             modifier = Modifier
                                                 .size(52.dp)
                                                 .clip(CircleShape)
-                                                .background(Color(0xFF1B2234))
-                                                .border(1.dp, Color(0xFF334155), CircleShape),
+                                                .background(Color(0xFF151E32))
+                                                .border(1.dp, Color(0xFF26324B), CircleShape),
                                             contentAlignment = Alignment.Center
                                         ) {
                                             Box(
@@ -679,32 +840,26 @@ fun OmarVioBrowserApp(
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(Color(0xFF064E3B).copy(alpha = 0.35f))
-                                .border(1.dp, Color(0xFF10B981).copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-                                .padding(horizontal = 14.dp, vertical = 10.dp)
-                        ) {
-                            Icon(Icons.Default.VerifiedUser, contentDescription = null, tint = Color(0xFF34D399), modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "১০০% রিয়েল অ্যান্ড্রয়েড ক্রোমিয়াম ইঞ্জিন • কোনো প্রক্সি বাধা নেই",
-                                fontSize = 11.sp,
-                                color = Color(0xFFA7F3D0),
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Text(
+                            text = "রিয়েল ক্রোমিয়াম ইঞ্জিন · বিজ্ঞাপন ও ট্র্যাকার ব্লক সক্রিয়",
+                            fontSize = 11.sp,
+                            color = Color(0xFF64748B),
+                            textAlign = TextAlign.Center
+                        )
                     }
                 }
             }
 
-            // Bottom Navigation Toolbar
-            Surface(color = Color(0xFF0B1329), modifier = Modifier.fillMaxWidth().height(50.dp)) {
+            // Bottom Navigation Toolbar with navigationBarsPadding so system keys never cover buttons
+            Surface(color = Color(0xFF0B1329), modifier = Modifier.fillMaxWidth()) {
                 Row(
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .height(50.dp)
+                        .padding(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -753,11 +908,16 @@ fun OmarVioBrowserApp(
                     IconButton(onClick = {
                         if (!isHomeVisible) internalWebView?.reload()
                     }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Reload", tint = if (!isHomeVisible) Color.White else Color(0xFF475569))
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = "Reload",
+                            tint = if (!isHomeVisible) Color.White else Color(0xFF475569)
+                        )
                     }
 
                     IconButton(onClick = {
-                        val shareTarget = if (isHomeVisible || currentUrl.isBlank()) "https://github.com" else currentUrl
+                        val shareTarget =
+                            if (isHomeVisible || currentUrl.isBlank()) "https://github.com/omarvio-live/omarviobrowser" else currentUrl
                         val shareIntent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
                             putExtra(Intent.EXTRA_TEXT, shareTarget)

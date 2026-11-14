@@ -61,14 +61,15 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     }
   }
 
+  const DEFAULT_PUBLIC_REPO = 'omarvio-live/omarviobrowser';
   const envApkUrl = (env.OMARVIO_APK_URL || manifestApkUrl || '').trim();
-  const envRepo = (env.OMARVIO_GITHUB_REPO || kvRepo || manifestRepo || '')
+  const envRepo = (env.OMARVIO_GITHUB_REPO || kvRepo || manifestRepo || DEFAULT_PUBLIC_REPO)
     .trim()
     .replace(/^https?:\/\/github\.com\//i, '')
     .replace(/\.git$/i, '')
     .replace(/\/+$/, '');
   const directUrl =
-    envApkUrl || (envRepo ? `https://github.com/${envRepo}/releases/latest/download/omarvio-browser.apk` : '');
+    envApkUrl || `https://github.com/${envRepo}/releases/latest/download/omarvio-browser.apk`;
 
   if (directUrl && urlObj.searchParams.get('hub') !== '1') {
     return Response.redirect(directUrl, 302);

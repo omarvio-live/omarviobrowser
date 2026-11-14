@@ -699,13 +699,13 @@ export default function App() {
             </div>
 
             {/* Right Action Icons matching Brave / Chrome Android */}
-            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <div className="flex items-center gap-1.5 shrink-0">
               {/* Privacy Shield Badge */}
               <button
                 type="button"
                 onClick={() => openSettings('privacy')}
                 title="OMARVIO Privacy Shield (Active - Zero Trackers)"
-                className="w-8 h-8 rounded-full bg-cyan-950/80 border border-cyan-400/50 flex items-center justify-center text-cyan-300 shadow-sm cursor-pointer hover:bg-cyan-900/60 transition-colors"
+                className="w-10 h-10 rounded-full bg-cyan-950/80 border border-cyan-400/50 flex items-center justify-center text-cyan-300 shadow-sm cursor-pointer hover:bg-cyan-900/60 transition-colors"
               >
                 <ShieldCheck className="w-4 h-4 text-cyan-400" />
               </button>
@@ -715,7 +715,7 @@ export default function App() {
                 type="button"
                 onClick={() => setIsTabSwitcherOpen(true)}
                 title="Tabs Overview"
-                className="w-8 h-8 rounded-lg border border-[#3c4043] bg-[#28292c] text-[#e3e3e3] hover:text-white hover:border-cyan-400/60 font-mono font-bold text-xs transition-colors flex items-center justify-center active:scale-95 shadow-sm cursor-pointer"
+                className="w-10 h-10 rounded-xl border border-[#3c4043] bg-[#28292c] text-[#e3e3e3] hover:text-white hover:border-cyan-400/60 font-mono font-bold text-xs transition-colors flex items-center justify-center active:scale-95 shadow-sm cursor-pointer tabular-nums"
               >
                 {tabs.length}
               </button>
@@ -725,7 +725,7 @@ export default function App() {
                 type="button"
                 onClick={() => setIsChromeMenuOpen(true)}
                 title="More Options"
-                className="w-8 h-8 rounded-full text-[#c4c7c5] hover:text-white hover:bg-[#3c4043] flex items-center justify-center transition-colors active:scale-95 cursor-pointer"
+                className="w-10 h-10 rounded-full text-[#c4c7c5] hover:text-white hover:bg-[#3c4043] flex items-center justify-center transition-colors active:scale-95 cursor-pointer"
               >
                 <MoreVertical className="w-5 h-5" />
               </button>

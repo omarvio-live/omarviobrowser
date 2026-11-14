@@ -37,6 +37,8 @@
     "OMARVIO_VAULT_SIGNATURE": "OMARVIO-GLOBAL-LTD-AES-256-GCM-CERTIFIED",
     "CLOUDFLARE_EDGE_SYNC": "enabled",
     "NODE_ENV": "production",
-    "ALLOW_FRAME_BYPASS": "true"
+    "ALLOW_FRAME_BYPASS": "true",
+    "OMARVIO_GITHUB_REPO": "omarvio-live/omarviobrowser",
+    "OMARVIO_APK_URL": "https://github.com/omarvio-live/omarviobrowser/releases/latest/download/omarvio-browser.apk"
   }
 }

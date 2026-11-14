@@ -32,17 +32,18 @@ function omarvioApkManifestPlugin() {
             existing = JSON.parse(fs.readFileSync(distFile, 'utf8'));
           } catch {}
         }
-        const detectedRepo = detectGitHubRepo() || (existing.repo || '').trim();
+        const detectedRepo = detectGitHubRepo() || (existing.repo || '').trim() || 'omarvio-live/omarviobrowser';
         const apkUrl =
           (process.env.OMARVIO_APK_URL || '').trim() ||
           (existing.apkUrl || '').trim() ||
-          (detectedRepo ? `https://github.com/${detectedRepo}/releases/latest/download/omarvio-browser.apk` : '');
+          `https://github.com/${detectedRepo}/releases/latest/download/omarvio-browser.apk`;
 
         if (detectedRepo || apkUrl) {
           fs.writeFileSync(
             distFile,
             JSON.stringify(
               {
+                ...existing,
                 repo: detectedRepo,
                 apkUrl,
                 version: existing.version || '2.0.0',
