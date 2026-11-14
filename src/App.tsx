@@ -44,6 +44,7 @@ import { SplashScreen } from './components/SplashScreen';
 import { registerServiceWorker } from './engine/swRegister';
 import { computeAliveTabIds, getMaxAliveTabs } from './engine/tabManager';
 import { markTabSwitchStart, measureTabSwitchEnd } from './engine/metrics';
+import { isAndroidNativeShell, openUrlInNativeAndroid } from './engine/nativeBridge';
 
 // Module M7: Code-split heavy modals with React.lazy
 const SettingsDrawer = React.lazy(() => import('./components/SettingsDrawer').then(m => ({ default: m.SettingsDrawer })));
@@ -150,8 +151,10 @@ export default function App() {
   const [isOledDark, setIsOledDark] = useState(getOledDarkStatus());
   const [currentLang, setCurrentLang] = useState(getLanguage);
 
+  const isAndroidShell = React.useMemo(() => isAndroidNativeShell(), []);
+
   // Splash Screen Engine & PWA Readiness Lifecycle
-  const [isSplashMounted, setIsSplashMounted] = useState(true);
+  const [isSplashMounted, setIsSplashMounted] = useState(() => !isAndroidNativeShell());
   const [isSplashExiting, setIsSplashExiting] = useState(false);
   const [splashProgress, setSplashProgress] = useState(25);
   const [splashStageLabel, setSplashStageLabel] = useState(() =>
@@ -445,6 +448,9 @@ export default function App() {
   const executeNavigate = (targetUrl: string) => {
     if (targetUrl) {
       addBrowsingHistory(targetUrl);
+      if (isAndroidShell && openUrlInNativeAndroid(targetUrl)) {
+        return;
+      }
     }
     try {
       window.history.pushState({ url: targetUrl, time: Date.now() }, '');
@@ -678,8 +684,8 @@ export default function App() {
         onSkip={dismissSplash}
       />
 
-      {/* Smart Auto-Hide "Add to Home Screen" Banner */}
-      <InstallBanner />
+      {/* Smart Auto-Hide "Add to Home Screen" Banner (hidden inside Native Android APK) */}
+      {!isAndroidShell && <InstallBanner />}
 
       {/* Top Header matching Chrome on Android */}
       <header
@@ -690,13 +696,24 @@ export default function App() {
         {!activeTab.url ? (
           /* HOME SCREEN HEADER: Brave-style Clean Minimalist Bar (Single unified search bar on Home) */
           <div className="w-full flex items-center justify-between gap-2 py-0.5">
-            {/* Logo & Brand Name */}
-            <div
-              className="shrink-0 flex items-center gap-2"
-              title="OMARVIO Home"
-            >
-              <HeaderBranding compact={true} />
-            </div>
+            {/* Logo & Brand Name (avoid duplicating Android native top bar when inside Android Shell) */}
+            {isAndroidShell ? (
+              <button
+                type="button"
+                onClick={() => openSettings('general')}
+                className="min-h-[40px] px-2.5 rounded-lg text-xs font-medium text-cyan-300 hover:bg-white/5 flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Settings className="w-4 h-4" />
+                <span>কুইক সেটিংস ও থিম</span>
+              </button>
+            ) : (
+              <div
+                className="shrink-0 flex items-center gap-2"
+                title="OMARVIO Home"
+              >
+                <HeaderBranding compact={true} />
+              </div>
+            )}
 
             {/* Right Action Icons matching Brave / Chrome Android */}
             <div className="flex items-center gap-1.5 shrink-0">
@@ -993,12 +1010,17 @@ export default function App() {
         onClose={() => setIsSearchOverlayOpen(false)}
         onNavigate={handleNavigate}
         onNewTabWithQuery={(q) => {
-          const newTab = createDefaultTab();
-          newTab.url = q.includes('.')
+          const targetUrl = q.includes('.')
             ? q.startsWith('http')
               ? q
               : `https://${q}`
             : `https://duckduckgo.com/?q=${encodeURIComponent(q)}`;
+          if (isAndroidShell && openUrlInNativeAndroid(targetUrl)) {
+            addBrowsingHistory(targetUrl);
+            return;
+          }
+          const newTab = createDefaultTab();
+          newTab.url = targetUrl;
           newTab.title = q;
           setTabs((prev) => [...prev, newTab]);
           setActiveTabId(newTab.id);

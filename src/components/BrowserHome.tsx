@@ -30,6 +30,7 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { getSanitizedSearchUrl } from '../engine/adblocker';
+import { isAndroidNativeShell } from '../engine/nativeBridge';
 import {
   SearchEngineSelectorModal,
   SEARCH_ENGINES,
@@ -607,32 +608,34 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
         </div>
 
         {/* ============================================================== */}
-        {/* 5. NATIVE ANDROID APK DOWNLOAD HUB & PWA COMPACT CARD          */}
+        {/* 5. NATIVE ANDROID APK DOWNLOAD HUB (Hidden inside Android APK) */}
         {/* ============================================================== */}
-        <div className="w-full p-4 rounded-2xl bg-slate-900/60 border border-slate-800 flex items-center justify-between gap-3 mb-4 relative z-10 shadow-sm">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-              <Download className="w-4 h-4" />
+        {!isAndroidNativeShell() && (
+          <div className="w-full p-4 rounded-2xl bg-slate-900/60 border border-slate-800 flex items-center justify-between gap-3 mb-4 relative z-10 shadow-sm">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                <Download className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="font-semibold text-slate-100 text-xs sm:text-sm truncate">
+                  অ্যান্ড্রয়েড নেটিভ APK
+                </p>
+                <p className="text-[11px] text-slate-400 truncate">
+                  v2.0.0.4 · ১০.৬ MB · সরাসরি ফোনে ইনস্টলযোগ্য
+                </p>
+              </div>
             </div>
-            <div className="min-w-0">
-              <p className="font-semibold text-slate-100 text-xs sm:text-sm truncate">
-                অ্যান্ড্রয়েড নেটিভ APK
-              </p>
-              <p className="text-[11px] text-slate-400 truncate">
-                v2.0.0.4 · ১০.৬ MB · সরাসরি ফোনে ইনস্টলযোগ্য
-              </p>
-            </div>
+            <a
+              href="/api/download-apk"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-all active:scale-95 shrink-0 cursor-pointer whitespace-nowrap"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>ডাউনলোড</span>
+            </a>
           </div>
-          <a
-            href="/api/download-apk"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-all active:scale-95 shrink-0 cursor-pointer whitespace-nowrap"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>ডাউনলোড</span>
-          </a>
-        </div>
+        )}
 
         {/* ============================================================== */}
         {/* 6. SUBTLE FOOTER TRUST CAPTION                                 */}

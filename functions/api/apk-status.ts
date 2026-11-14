@@ -28,13 +28,29 @@ export const onRequest: PagesFunction<Env> = async (context) => {
 
   let manifestRepo = '';
   let manifestApkUrl = '';
+  let manifestVersion = '';
+  let manifestVersionCode = 4;
+  let manifestSha256 = '71ab9e0fe1b43e3c20bcf92d1bd6e4c95dce6969584d2dbdf4c04433866fd766';
   if (env.ASSETS) {
     try {
       const assetRes = await env.ASSETS.fetch(new URL('/apk-release.json', request.url));
       if (assetRes.ok) {
-        const manifest = (await assetRes.json()) as { repo?: string; apkUrl?: string };
+        const manifest = (await assetRes.json()) as {
+          repo?: string;
+          apkUrl?: string;
+          version?: string;
+          versionCode?: number;
+          sha256?: string;
+        };
         manifestRepo = (manifest.repo || '').trim();
         manifestApkUrl = (manifest.apkUrl || '').trim();
+        manifestVersion = (manifest.version || '').trim();
+        if (typeof manifest.versionCode === 'number') {
+          manifestVersionCode = manifest.versionCode;
+        }
+        if (manifest.sha256) {
+          manifestSha256 = manifest.sha256.trim();
+        }
       }
     } catch {}
   }
@@ -56,8 +72,9 @@ export const onRequest: PagesFunction<Env> = async (context) => {
       githubRepo: envRepo,
       workflowFile: '.github/workflows/build-apk.yml',
       packageName: 'com.omarvio.browser',
-      version: '2.0.0.4',
-      sha256: '71ab9e0fe1b43e3c20bcf92d1bd6e4c95dce6969584d2dbdf4c04433866fd766',
+      version: manifestVersion || '2.0.0.4',
+      versionCode: manifestVersionCode,
+      sha256: manifestSha256,
     }),
     {
       headers: {

@@ -136,6 +136,7 @@ jobs:
         env:
           REPO_SLUG: ${{ github.repository }}
           APP_VERSION: ${{ steps.release_meta.outputs.version_name }}
+          APP_VERSION_CODE: ${{ steps.release_meta.outputs.version_code }}
         run: |
           node -e '
             const fs = require("fs");
@@ -144,6 +145,7 @@ jobs:
               repo,
               apkUrl: repo ? `https://github.com/${repo}/releases/latest/download/omarvio-browser.apk` : "",
               version: process.env.APP_VERSION || "2.0.0",
+              versionCode: Number(process.env.APP_VERSION_CODE || 1),
               host: "github-releases",
               updatedAt: new Date().toISOString()
             };
