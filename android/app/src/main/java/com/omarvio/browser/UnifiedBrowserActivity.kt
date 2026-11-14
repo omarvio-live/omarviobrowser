@@ -27,18 +27,13 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
 
-/**
- * Hosts the exact same React browser UI as the Cloudflare Pages website.
- * Keep browser chrome and browser features in the shared web application;
- * this Activity only provides Android platform integration.
- */
+/** Hosts the same React browser UI as the Cloudflare Pages site. */
 class UnifiedBrowserActivity : ComponentActivity() {
     private lateinit var root: FrameLayout
     private lateinit var webView: WebView
@@ -53,12 +48,8 @@ class UnifiedBrowserActivity : ComponentActivity() {
         if (callback == null) return@registerForActivityResult
         val data = result.data
         val uris = if (result.resultCode == RESULT_OK && data != null) {
-            val clip = data.clipData
-            when {
-                clip != null -> Array(clip.itemCount) { index -> clip.getItemAt(index).uri }
-                data.data != null -> arrayOf(data.data!!)
-                else -> null
-            }
+            data.clipData?.let { clip -> Array(clip.itemCount) { index -> clip.getItemAt(index).uri } }
+                ?: data.data?.let { arrayOf(it) }
         } else null
         callback.onReceiveValue(uris)
     }
@@ -67,12 +58,14 @@ class UnifiedBrowserActivity : ComponentActivity() {
         val request = pendingWebPermission
         pendingWebPermission = null
         if (request == null) return@registerForActivityResult
-        val required = request.resources.filter { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE || it == PermissionRequest.RESOURCE_VIDEO_CAPTURE }
-        val allGranted = required.all { resource ->
-            val permission = if (resource == PermissionRequest.RESOURCE_AUDIO_CAPTURE) Manifest.permission.RECORD_AUDIO else Manifest.permission.CAMERA
-            result[permission] == true || ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+        val allowed = request.resources.filter { resource ->
+            when (resource) {
+                PermissionRequest.RESOURCE_AUDIO_CAPTURE -> result[Manifest.permission.RECORD_AUDIO] == true || ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                PermissionRequest.RESOURCE_VIDEO_CAPTURE -> result[Manifest.permission.CAMERA] == true || ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                else -> false
+            }
         }
-        if (allGranted && !isFinishing) request.grant(required.toTypedArray()) else request.deny()
+        if (allowed.isNotEmpty() && !isFinishing) request.grant(allowed.toTypedArray()) else request.deny()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -112,17 +105,17 @@ class UnifiedBrowserActivity : ComponentActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val uri = request?.url ?: return false
-                val scheme = uri.scheme?.lowercase() ?: return true
-                if (scheme == "http" || scheme == "https") return false
-                if (scheme in setOf("mailto", "tel", "sms")) {
-                    runCatching { startActivity(Intent(Intent.ACTION_VIEW, uri)) }
-                    return true
+                return when (uri.scheme?.lowercase()) {
+                    "http", "https" -> false
+                    "mailto", "tel", "sms" -> {
+                        runCatching { startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                        true
+                    }
+                    else -> true
                 }
-                return true
             }
 
             override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: android.net.http.SslError?) {
-                // Never bypass certificate errors in a browser.
                 handler?.cancel()
             }
         }
@@ -146,29 +139,22 @@ class UnifiedBrowserActivity : ComponentActivity() {
 
             override fun onPermissionRequest(request: PermissionRequest?) {
                 if (request == null) return
-                val resources = request.resources.toSet()
-                val androidPermissions = buildList {
-                    if (PermissionRequest.RESOURCE_AUDIO_CAPTURE in resources) add(Manifest.permission.RECORD_AUDIO)
-                    if (PermissionRequest.RESOURCE_VIDEO_CAPTURE in resources) add(Manifest.permission.CAMERA)
-                }
-                if (androidPermissions.isEmpty()) {
+                val host = runCatching { Uri.parse(request.origin.toString()).host }.getOrNull()
+                if (host != "omarvio-browser.pages.dev") {
                     request.deny()
                     return
                 }
-                val originHost = runCatching { Uri.parse(request.origin.toString()).host }.getOrNull()
-                if (originHost != "omarvio-browser.pages.dev") {
+                val needed = buildList {
+                    if (PermissionRequest.RESOURCE_AUDIO_CAPTURE in request.resources) add(Manifest.permission.RECORD_AUDIO)
+                    if (PermissionRequest.RESOURCE_VIDEO_CAPTURE in request.resources) add(Manifest.permission.CAMERA)
+                }.distinct()
+                if (needed.isEmpty()) {
                     request.deny()
                     return
                 }
-                val missing = androidPermissions.filter { ContextCompat.checkSelfPermission(this@UnifiedBrowserActivity, it) != PackageManager.PERMISSION_GRANTED }
+                val missing = needed.filter { ContextCompat.checkSelfPermission(this@UnifiedBrowserActivity, it) != PackageManager.PERMISSION_GRANTED }
                 if (missing.isEmpty()) {
-                    request.grant(androidPermissions.mapNotNull { permission ->
-                        when (permission) {
-                            Manifest.permission.CAMERA -> PermissionRequest.RESOURCE_VIDEO_CAPTURE
-                            Manifest.permission.RECORD_AUDIO -> PermissionRequest.RESOURCE_AUDIO_CAPTURE
-                            else -> null
-                        }
-                    }.toTypedArray())
+                    request.grant(request.resources.filter { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE || it == PermissionRequest.RESOURCE_VIDEO_CAPTURE }.toTypedArray())
                 } else {
                     pendingWebPermission = request
                     mediaPermissionLauncher.launch(missing.toTypedArray())
@@ -184,32 +170,26 @@ class UnifiedBrowserActivity : ComponentActivity() {
                 fullscreenCallback = callback
                 root.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
                 webView.visibility = View.GONE
-                window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
+                window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
             }
 
             override fun onHideCustomView() = exitFullscreen()
         }
 
-        webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
-            startDownload(url, userAgent, contentDisposition, mimeType)
+        webView.setDownloadListener(DownloadListener { url, userAgent, disposition, mimeType, _ ->
+            startDownload(url, userAgent, disposition, mimeType)
         })
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (fullscreenView != null) {
-                    exitFullscreen()
-                } else if (webView.canGoBack()) {
-                    webView.goBack()
-                } else {
-                    // The shared React UI manages its own tab and modal back stack.
-                    webView.evaluateJavascript("window.dispatchEvent(new PopStateEvent('popstate'))", null)
-                }
+                if (fullscreenView != null) exitFullscreen()
+                else if (webView.canGoBack()) webView.goBack()
+                else webView.evaluateJavascript("window.dispatchEvent(new PopStateEvent('popstate'))", null)
             }
         })
 
-        val incoming = intent?.dataString?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
-        val startUrl = incoming ?: "https://omarvio-browser.pages.dev/?androidShell=1"
-        webView.loadUrl(startUrl)
+        val incomingUrl = intent?.dataString?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+        webView.loadUrl(incomingUrl ?: "https://omarvio-browser.pages.dev/?androidShell=1")
         checkForApkUpdate()
     }
 
@@ -225,17 +205,17 @@ class UnifiedBrowserActivity : ComponentActivity() {
 
     private fun startDownload(url: String, userAgent: String?, disposition: String?, mimeType: String?) {
         runCatching {
-            val name = URLUtil.guessFileName(url, disposition, mimeType)
+            val fileName = URLUtil.guessFileName(url, disposition, mimeType)
             val request = DownloadManager.Request(Uri.parse(url)).apply {
-                setTitle(name)
+                setTitle(fileName)
                 setDescription("OMARVIO Browser download")
                 setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
-                mimeType?.let { setMimeType(it) }
+                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                mimeType?.let(::setMimeType)
                 userAgent?.let { addRequestHeader("User-Agent", it) }
             }
             (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
-            Toast.makeText(this, "ডাউনলোড শুরু হয়েছে: $name", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "ডাউনলোড শুরু হয়েছে: $fileName", Toast.LENGTH_SHORT).show()
         }.onFailure {
             Toast.makeText(this, "ডাউনলোড শুরু করা যায়নি", Toast.LENGTH_SHORT).show()
         }
@@ -253,18 +233,18 @@ class UnifiedBrowserActivity : ComponentActivity() {
                     readTimeout = 5000
                 }
                 if (connection.responseCode != 200) return@runCatching null
-                val json = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
-                val remote = json.optString("version").trim()
-                val apk = json.optString("directApkUrl").trim()
-                val uri = Uri.parse(apk)
-                if (remote.isBlank() || !isNewer(remote, localVersion) || uri.scheme != "https" || uri.host != "github.com") null
-                else remote to apk
+                val data = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+                val remoteVersion = data.optString("version").trim()
+                val apkUrl = data.optString("directApkUrl").trim()
+                val apkUri = Uri.parse(apkUrl)
+                if (remoteVersion.isBlank() || !isNewer(remoteVersion, localVersion) || apkUri.scheme != "https" || apkUri.host != "github.com") null
+                else remoteVersion to apkUrl
             }.getOrNull()
             if (update != null) runOnUiThread {
-                if (!isFinishing) AlertDialog.Builder(this)
+                if (!isFinishing) android.app.AlertDialog.Builder(this)
                     .setTitle("OMARVIO আপডেট পাওয়া গেছে")
                     .setMessage("নতুন সংস্করণ ${update.first} ডাউনলোড করতে চান?")
-                    .setNegativeButton("পরে") { dialog, _ -> dialog.dismiss() }
+                    .setNegativeButton("পরে", null)
                     .setPositiveButton("ডাউনলোড") { _, _ -> startDownload(update.second, null, "attachment; filename=omarvio-browser.apk", "application/vnd.android.package-archive") }
                     .show()
             }
@@ -272,10 +252,10 @@ class UnifiedBrowserActivity : ComponentActivity() {
     }
 
     private fun isNewer(remote: String, local: String): Boolean {
-        val r = remote.split(Regex("[^0-9]+?")).filter(String::isNotEmpty).mapNotNull(String::toIntOrNull)
-        val l = local.split(Regex("[^0-9]+?")).filter(String::isNotEmpty).mapNotNull(String::toIntOrNull)
-        for (index in 0 until maxOf(r.size, l.size)) {
-            val comparison = r.getOrElse(index) { 0 }.compareTo(l.getOrElse(index) { 0 })
+        val remoteParts = remote.split(Regex("[^0-9]+")).filter(String::isNotEmpty).mapNotNull(String::toIntOrNull)
+        val localParts = local.split(Regex("[^0-9]+")).filter(String::isNotEmpty).mapNotNull(String::toIntOrNull)
+        for (index in 0 until maxOf(remoteParts.size, localParts.size)) {
+            val comparison = remoteParts.getOrElse(index) { 0 }.compareTo(localParts.getOrElse(index) { 0 })
             if (comparison != 0) return comparison > 0
         }
         return false
@@ -284,7 +264,7 @@ class UnifiedBrowserActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.dataString?.takeIf { it.startsWith("http://") || it.startsWith("https://") }?.let(webView::loadUrl)
+        intent.dataString?.takeIf { it.startsWith("https://") || it.startsWith("http://") }?.let(webView::loadUrl)
     }
 
     override fun onDestroy() {
