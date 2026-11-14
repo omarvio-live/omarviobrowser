@@ -7,18 +7,19 @@
  * Slogan: "My Phone, My Data – Why Surrender It To Others!"
  */
 
-const SHELL_CACHE = 'omarvio-shell-v6';
-const ASSET_CACHE = 'omarvio-asset-cache-v6';
-const VENDOR_CACHE = 'omarvio-vendor-v6';
-const STATIC_CACHE = 'omarvio-static-v6';
-const NAV_CACHE = 'omarvio-nav-cache-v2';
+const SHELL_CACHE = 'omarvio-shell-v7';
+const ASSET_CACHE = 'omarvio-asset-cache-v7';
+const VENDOR_CACHE = 'omarvio-vendor-v7';
+const STATIC_CACHE = 'omarvio-static-v7';
+const NAV_CACHE = 'omarvio-nav-cache-v3';
 const MAX_ASSET_CACHE_ENTRIES = 120;
 
 const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
-  '/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png'
+  '/assets/omarvio-logo-256.webp',
+  '/assets/omarvio-icon-192.png'
 ];
 
 // Blocklist of trackers, analytics, telemetry, and banner ad networks
@@ -253,6 +254,7 @@ self.addEventListener('fetch', (event) => {
     reqUrl.endsWith('.js') ||
     reqUrl.endsWith('.css') ||
     reqUrl.endsWith('.png') ||
+    reqUrl.endsWith('.webp') ||
     reqUrl.endsWith('.jpg') ||
     reqUrl.endsWith('.svg') ||
     reqUrl.endsWith('.json')

@@ -5,19 +5,13 @@
   "description": "My Phone, My Data – Why Surrender It To Others! Privacy-first hybrid PWA browser by OMARVIO GLOBAL LTD.",
   "icons": [
     {
-      "src": "/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png",
-      "type": "image/png",
-      "sizes": "1254x1254",
-      "purpose": "any"
-    },
-    {
-      "src": "/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png",
+      "src": "/assets/omarvio-icon-512.png",
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "any"
     },
     {
-      "src": "/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png",
+      "src": "/assets/omarvio-icon-192.png",
       "type": "image/png",
       "sizes": "192x192",
       "purpose": "any"
@@ -54,7 +48,7 @@
       "url": "/?mode=intent_picker",
       "icons": [
         {
-          "src": "/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png",
+          "src": "/assets/omarvio-icon-192.png",
           "sizes": "192x192",
           "type": "image/png"
         }
@@ -67,7 +61,7 @@
       "url": "/?mode=incognito",
       "icons": [
         {
-          "src": "/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png",
+          "src": "/assets/omarvio-icon-192.png",
           "sizes": "192x192",
           "type": "image/png"
         }

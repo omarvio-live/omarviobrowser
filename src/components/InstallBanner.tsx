@@ -85,21 +85,22 @@ export const InstallBanner: React.FC = () => {
 
   return (
     <div className="w-full bg-gradient-to-r from-blue-950 via-indigo-950 to-slate-950 border-b border-cyan-500/30 text-xs shadow-md z-30 select-none animate-fadeIn">
-      <div className="max-w-7xl mx-auto px-3 py-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2.5 min-w-0">
+      <div className="max-w-7xl mx-auto px-2.5 sm:px-3 py-2 flex items-center justify-between gap-1.5 sm:gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           <img
-            src="/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png"
+            src="/assets/omarvio-logo-256.webp"
             alt="OMARVIO BROWSER"
+            decoding="sync"
             className="w-8 h-8 aspect-square rounded-lg object-contain bg-black shrink-0 shadow-sm"
           />
           <div className="min-w-0">
-            <p className="font-bold text-slate-100 flex items-center gap-1.5 text-[11px] sm:text-xs truncate">
+            <p className="font-bold text-slate-100 flex items-center gap-1.5 text-[11px] sm:text-xs whitespace-nowrap">
               <span>OMARVIO BROWSER</span>
-              <span className="text-[9px] text-cyan-300 font-semibold px-1.5 py-0.2 rounded-full bg-cyan-500/20 border border-cyan-400/30">
+              <span className="hidden sm:inline-block text-[9px] text-cyan-300 font-semibold px-1.5 py-0.2 rounded-full bg-cyan-500/20 border border-cyan-400/30">
                 PWA
               </span>
             </p>
-            <p className="text-[10px] text-slate-400 truncate hidden xs:block">
+            <p className="text-[10px] text-slate-400 truncate hidden sm:block">
               ক্রোমের ঝামেলা ছাড়া হোম স্ক্রিন থেকে চালান
             </p>
           </div>
@@ -111,7 +112,7 @@ export const InstallBanner: React.FC = () => {
               <Check className="w-3.5 h-3.5" /> ইনস্টল সম্পন্ন!
             </span>
           ) : (
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1 sm:gap-1.5">
               <a
                 href={(() => {
                   if (typeof window !== 'undefined') {
@@ -124,20 +125,21 @@ export const InstallBanner: React.FC = () => {
                 })()}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1 px-2.5 sm:px-3 py-1 rounded-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-[11px] sm:text-xs shadow-sm shadow-emerald-950 active:scale-95 transition-all cursor-pointer touch-manipulation"
+                className="flex items-center gap-1 px-2 sm:px-3 py-1 rounded-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-[10px] sm:text-xs shadow-sm shadow-emerald-950 active:scale-95 transition-all cursor-pointer touch-manipulation whitespace-nowrap"
                 title="সরাসরি নেটিভ অ্যান্ড্রয়েড APK ডাউনলোড করুন"
               >
-                <Download className="w-3.5 h-3.5" />
-                <span>APK ডাউনলোড</span>
+                <Download className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                <span>APK</span>
+                <span className="hidden xs:inline sm:inline">ডাউনলোড</span>
               </a>
 
               <button
                 type="button"
                 onClick={handleInstallClick}
-                className="flex items-center gap-1 px-2.5 sm:px-3 py-1 rounded-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-[11px] sm:text-xs shadow-sm shadow-cyan-950 active:scale-95 transition-all cursor-pointer touch-manipulation"
+                className="flex items-center gap-1 px-2 sm:px-3 py-1 rounded-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-[10px] sm:text-xs shadow-sm shadow-cyan-950 active:scale-95 transition-all cursor-pointer touch-manipulation whitespace-nowrap"
                 title="ব্রাউজার থেকে সরাসরি PWA অ্যাপ ইনস্টল করুন"
               >
-                <Download className="w-3.5 h-3.5" />
+                <Download className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
                 <span className="sm:hidden">PWA</span>
                 <span className="hidden sm:inline">PWA ইনস্টল</span>
               </button>

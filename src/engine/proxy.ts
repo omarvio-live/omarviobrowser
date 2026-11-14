@@ -316,27 +316,7 @@ export const prewarmPopularDnsEntries = (domains: string[] = POPULAR_HIGH_TRAFFI
       }
     } catch {}
 
-    // 2. Broadcast to Service Worker to pre-warm DNS sockets in background thread
-    if (navigator.serviceWorker?.controller) {
-      try {
-        navigator.serviceWorker.controller.postMessage({
-          type: 'PREWARM_DNS_ENTRIES',
-          domains,
-          timestamp: Date.now(),
-        });
-      } catch {}
-    }
-
-    // 3. Dispatch speculative low-priority zero-payload no-cors probes during idle slots
-    domains.slice(0, 8).forEach((siteUrl) => {
-      try {
-        fetch(siteUrl, {
-          mode: 'no-cors',
-          cache: 'no-store',
-          priority: 'low',
-        } as any).catch(() => {});
-      } catch {}
-    });
+    // Keep startup bandwidth free: DNS-prefetch & preconnect tags handle lookup warming with 0 bytes downloaded
   };
 
   // Schedule strictly during idle CPU time so page interactions remain 60fps responsive
@@ -481,52 +461,8 @@ export const initHighPriorityWarmUp = (domains: string[] = ESSENTIAL_WARM_DOMAIN
   if (typeof window === 'undefined' || isWarmUpRunning) return;
   isWarmUpRunning = true;
 
-  // 1. Pre-warm popular DNS entries for high-traffic sites during idle CPU periods
+  // 1. Pre-warm popular DNS entries via lightweight DOM <link> tags during idle CPU periods
   prewarmPopularDnsEntries(POPULAR_HIGH_TRAFFIC_SITES);
-
-  // 2. Ensure offscreen warmup container exists
-  if (!document.getElementById('omarvio-warmup-pool')) {
-    const pool = document.createElement('div');
-    pool.id = 'omarvio-warmup-pool';
-    pool.style.cssText =
-      'display:none !important; position:fixed !important; width:0; height:0; visibility:hidden; pointer-events:none; z-index:-999;';
-    document.body.appendChild(pool);
-  }
-
-  // 3. Run high-priority resource warm-up during idle CPU slice
-  const runWarmUp = async () => {
-    for (const domain of domains) {
-      if (!warmedDomains.has(domain)) {
-        await warmUpDomainResources(domain);
-      }
-    }
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent('omarvio:warmup-complete', {
-          detail: {
-            domains: Array.from(warmedDomains),
-            dnsEntries: Array.from(prewarmedDnsSet),
-          },
-        })
-      );
-    }
-  };
-
-  if ('requestIdleCallback' in window) {
-    (window as any).requestIdleCallback(
-      (deadline: any) => {
-        if (!deadline || deadline.timeRemaining() > 5 || deadline.didTimeout) {
-          runWarmUp();
-        } else {
-          setTimeout(runWarmUp, 350);
-        }
-      },
-      { timeout: 2000 }
-    );
-  } else {
-    setTimeout(runWarmUp, 600);
-  }
 };
 
 export const isDomainWarmed = (domain: string): boolean => {

@@ -11,7 +11,7 @@ interface HeaderBrandingProps {
 }
 
 export const HeaderBranding: React.FC<HeaderBrandingProps> = ({ compact = false }) => {
-  const logoPath = '/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png';
+  const logoPath = '/assets/omarvio-logo-256.webp';
 
   if (compact) {
     return (

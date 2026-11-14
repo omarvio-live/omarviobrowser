@@ -116,18 +116,206 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     const finalUrl = response.url || targetUrl;
     const contentType = response.headers.get('content-type') || 'text/html';
 
-    // Clone response headers and delete framing blockers
+    // Clone response headers and delete ALL framing/decoding blockers
     const newHeaders = new Headers(response.headers);
     newHeaders.delete('X-Frame-Options');
     newHeaders.delete('Content-Security-Policy');
     newHeaders.delete('Content-Security-Policy-Report-Only');
     newHeaders.delete('Cross-Origin-Opener-Policy');
     newHeaders.delete('Cross-Origin-Embedder-Policy');
+    newHeaders.delete('Cross-Origin-Resource-Policy');
+    newHeaders.delete('Content-Encoding');
+    newHeaders.delete('Content-Length');
+    newHeaders.delete('Transfer-Encoding');
+    newHeaders.delete('Clear-Site-Data');
+    newHeaders.delete('Report-To');
+    newHeaders.delete('NEL');
     newHeaders.set('Access-Control-Allow-Origin', '*');
     newHeaders.set('X-Omarvio-Edge', 'Cloudflare-Workers-2026');
 
+    const finalHost = (() => {
+      try {
+        return new URL(finalUrl).hostname.toLowerCase();
+      } catch {
+        return '';
+      }
+    })();
+
+    // Reader Mode JSON extraction (?reader=1)
+    if (urlObj.searchParams.get('reader') === '1' && (contentType.includes('text/html') || contentType.includes('application/xhtml+xml'))) {
+      const rawHtml = await response.text();
+      const titleM = rawHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      const cleanTitle = (titleM ? titleM[1].replace(/<[^>]+>/g, '').trim() : finalHost) || finalHost;
+      const bodyOnly = rawHtml
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+        .replace(/<(header|footer|nav|aside)[\s\S]*?<\/\1>/gi, ' ');
+      const paragraphs = Array.from(bodyOnly.matchAll(/<(p|h1|h2|h3|li)[^>]*>([\s\S]*?)<\/\1>/gi))
+        .map((m) => m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
+        .filter((t) => t.length > 28);
+      const textContent =
+        paragraphs.length > 0
+          ? paragraphs.slice(0, 60).join('\n\n')
+          : bodyOnly.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 6000);
+      return new Response(
+        JSON.stringify({ title: cleanTitle, url: finalUrl, content: textContent }),
+        { headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' } }
+      );
+    }
+
     if (contentType.includes('text/html') || contentType.includes('application/xhtml+xml')) {
       let html = await response.text();
+
+      // Smart Hub for YouTube non-embed pages (channels, @handles, playlists, search) & strict walled-garden SPAs
+      const isYouTubePage =
+        finalHost === 'm.youtube.com' || finalHost === 'www.youtube.com' || finalHost === 'youtube.com';
+      const isWalledGardenSpa =
+        finalHost.endsWith('facebook.com') ||
+        finalHost.endsWith('instagram.com') ||
+        finalHost.endsWith('tiktok.com') ||
+        finalHost === 'x.com' ||
+        finalHost === 'twitter.com' ||
+        finalHost === 'www.twitter.com';
+
+      if (isYouTubePage && !finalUrl.includes('/embed/')) {
+        const ogTitle =
+          (html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1] ||
+            html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] ||
+            'YouTube Channel / Page')
+            .replace(/ - YouTube$/i, '')
+            .replace(/&amp;/g, '&');
+        const ogDesc = (html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1] || '').replace(/&amp;/g, '&');
+        const ogImg = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1] || '';
+
+        const seenVids = new Set<string>();
+        const videos: Array<{ id: string; title: string }> = [];
+        const vidRegex = /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"[\s\S]{0,600}?"title"\s*:\s*\{[^}]*?"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
+        let m: RegExpExecArray | null;
+        while ((m = vidRegex.exec(html)) !== null && videos.length < 16) {
+          if (!seenVids.has(m[1])) {
+            seenVids.add(m[1]);
+            videos.push({ id: m[1], title: m[2].replace(/\\"/g, '"').replace(/\\u0026/g, '&') });
+          }
+        }
+        if (videos.length === 0) {
+          const simpleIds = html.matchAll(/"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"/g);
+          for (const sm of simpleIds) {
+            if (!seenVids.has(sm[1]) && videos.length < 12) {
+              seenVids.add(sm[1]);
+              videos.push({ id: sm[1], title: `${ogTitle} — Video` });
+            }
+          }
+        }
+
+        const esc = (s: string) =>
+          String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] || c));
+
+        const videoCardsHtml = videos
+          .map(
+            (v) => `
+            <a class="vcard" href="https://www.youtube.com/watch?v=${esc(v.id)}" onclick="event.preventDefault(); openYt('${esc(v.id)}');">
+              <img src="https://i.ytimg.com/vi/${esc(v.id)}/hqdefault.jpg" loading="lazy" alt="">
+              <div class="vinfo">
+                <div class="vtitle">${esc(v.title)}</div>
+                <div class="vmeta">▶️ ওমারভিও বিজ্ঞাপনমুক্ত প্লেয়ারে দেখুন</div>
+              </div>
+            </a>`
+          )
+          .join('');
+
+        return new Response(
+          `<!DOCTYPE html>
+          <html lang="bn">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>${esc(ogTitle)} — OMARVIO YouTube Hub</title>
+            <style>
+              body { background: #070913; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 16px; }
+              .wrap { max-width: 720px; margin: 0 auto; }
+              .hero { display: flex; gap: 14px; align-items: center; background: #0e1427; border: 1px solid rgba(56,189,248,0.28); border-radius: 20px; padding: 16px; margin-bottom: 16px; }
+              .avatar { width: 64px; height: 64px; border-radius: 16px; object-fit: cover; background: #000; flex-shrink: 0; }
+              h1 { margin: 0 0 4px; font-size: 18px; color: #fff; }
+              p { margin: 0; font-size: 12px; color: #94a3b8; line-height: 1.5; }
+              .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+              .btn { flex: 1; min-width: 180px; text-align: center; background: linear-gradient(135deg, #10b981, #06b6d4); color: #020617; font-weight: 800; font-size: 13px; padding: 11px 14px; border-radius: 12px; text-decoration: none; }
+              .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+              .vcard { display: flex; flex-direction: column; background: #0e1220; border: 1px solid #1e293b; border-radius: 16px; overflow: hidden; text-decoration: none; color: inherit; }
+              .vcard img { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: #000; }
+              .vinfo { padding: 10px 12px; }
+              .vtitle { font-size: 13px; font-weight: 700; color: #f1f5f9; line-height: 1.4; margin-bottom: 4px; }
+              .vmeta { font-size: 11px; color: #38bdf8; font-weight: 600; }
+            </style>
+          </head>
+          <body>
+            <div class="wrap">
+              <div class="hero">
+                ${ogImg ? `<img class="avatar" src="${esc(ogImg)}" alt="">` : ''}
+                <div>
+                  <h1>${esc(ogTitle)}</h1>
+                  <p>${esc(ogDesc || finalUrl)}</p>
+                </div>
+              </div>
+              <div class="actions">
+                <a class="btn" href="${esc(finalUrl)}" target="_blank" rel="noopener noreferrer">সরাসরি YouTube অ্যাপ / ব্রাউজারে খুলুন (১০০% কাজ করবে)</a>
+              </div>
+              ${videos.length > 0 ? `<div class="grid">${videoCardsHtml}</div>` : '<p style="text-align:center;color:#94a3b8;padding:20px 0;">ভিডিও দেখতে উপরের সরাসরি বাটনে ট্যাপ করুন অথবা ভিডিও লিংক সার্চ করুন।</p>'}
+            </div>
+            <script>
+              try { window.parent.postMessage({ type: 'OMARVIO_PROXY_READY', url: ${JSON.stringify(finalUrl)} }, '*'); } catch(e) {}
+              function openYt(id) {
+                var watchUrl = 'https://www.youtube.com/watch?v=' + id;
+                try { window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: watchUrl }, '*'); } catch(e) {}
+              }
+            </script>
+          </body>
+          </html>`,
+          { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Access-Control-Allow-Origin': '*' } }
+        );
+      }
+
+      if (isWalledGardenSpa) {
+        const ogTitle =
+          (html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1] ||
+            html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] ||
+            finalHost)
+            .replace(/&amp;/g, '&');
+        const ogDesc = (html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1] || '').replace(/&amp;/g, '&');
+        const ogImg = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1] || '';
+        const esc = (s: string) =>
+          String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] || c));
+        return new Response(
+          `<!DOCTYPE html>
+          <html lang="bn">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>${esc(ogTitle)}</title>
+            <style>
+              body { background: #070a14; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; text-align: center; }
+              .card { max-width: 460px; width: 100%; background: #0d1226; border: 1px solid rgba(6,182,212,0.35); border-radius: 24px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.65); }
+              .thumb { width: 100%; max-height: 190px; object-fit: cover; border-radius: 14px; margin-bottom: 14px; background: #000; }
+              h2 { margin: 0 0 8px; font-size: 18px; font-weight: 800; color: #f8fafc; }
+              p { font-size: 13px; color: #94a3b8; line-height: 1.55; margin: 0 0 18px; }
+              .btn { display: block; width: 100%; box-sizing: border-box; background: linear-gradient(135deg, #10b981, #06b6d4); color: #020617; font-weight: 800; font-size: 13px; padding: 12px 18px; border-radius: 14px; text-decoration: none; margin-bottom: 10px; }
+              .btn-sec { background: #1e293b; color: #cbd5e1; border: 1px solid #334155; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              ${ogImg ? `<img class="thumb" src="${esc(ogImg)}" alt="">` : ''}
+              <h2>${esc(ogTitle)}</h2>
+              <p>${esc(ogDesc || 'নিরাপত্তা ও লগইন সেশনের জন্য এই সোশ্যাল সাইটটি সরাসরি আপনার ব্রাউজার বা ওমারভিও নেটিভ অ্যাপে ওপেন করাই সবচেয়ে দ্রুত ও নির্ভরযোগ্য।')}</p>
+              <a class="btn" href="${esc(finalUrl)}" target="_blank" rel="noopener noreferrer">সরাসরি ওপেন করুন (১০০% কাজ করবে)</a>
+              <a class="btn btn-sec" href="/api/download-apk" target="_blank" rel="noopener">অ্যান্ড্রয়েড নেটিভ APK ডাউনলোড করুন</a>
+            </div>
+            <script>try { window.parent.postMessage({ type: 'OMARVIO_PROXY_READY', url: ${JSON.stringify(finalUrl)} }, '*'); } catch(e) {}</script>
+          </body>
+          </html>`,
+          { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Access-Control-Allow-Origin': '*' } }
+        );
+      }
 
       // Detect strict bot-protection / Cloudflare / WAF blocks (403/401/429/503) so user never hits a broken error
       const isBotChallenge =
@@ -165,6 +353,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
               <a class="btn" href="${finalUrl}" target="_blank" rel="noopener noreferrer">সরাসরি ওপেন করুন (১০০% কাজ করবে)</a>
               <a class="btn btn-sec" href="/api/download-apk" target="_blank" rel="noopener">অ্যান্ড্রয়েড নেটিভ APK ইনস্টল করুন (সব সাইট অটো চলে)</a>
             </div>
+            <script>try { window.parent.postMessage({ type: 'OMARVIO_PROXY_READY', url: ${JSON.stringify(finalUrl)} }, '*'); } catch(e) {}</script>
           </body>
           </html>`,
           {
@@ -215,6 +404,16 @@ export const onRequest: PagesFunction<Env> = async (context) => {
           (function() {
             var realParent = window.parent;
             var speculativeUrl = null;
+            try {
+              if (realParent && realParent !== window) {
+                realParent.postMessage({ type: 'OMARVIO_PROXY_READY', url: ${JSON.stringify(finalUrl)} }, '*');
+              }
+            } catch(e) {}
+            try {
+              if (navigator && navigator.serviceWorker) {
+                navigator.serviceWorker.register = function() { return Promise.resolve({}); };
+              }
+            } catch(e) {}
 
             function enforceSelfNavigation() {
               try {

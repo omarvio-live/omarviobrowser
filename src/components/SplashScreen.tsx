@@ -64,8 +64,10 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({
           <div className="w-28 h-28 aspect-square rounded-3xl bg-black border border-cyan-500/25 shadow-2xl shadow-cyan-950/50 flex items-center justify-center overflow-hidden">
             {!logoFailed ? (
               <img
-                src="/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png"
+                src="/assets/omarvio-logo-256.webp"
                 alt="OMARVIO BROWSER Official Emblem"
+                decoding="sync"
+                fetchPriority="high"
                 referrerPolicy="no-referrer"
                 onError={() => setLogoFailed(true)}
                 className="w-full h-full object-contain"

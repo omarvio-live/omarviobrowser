@@ -32,14 +32,16 @@ jobs:
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             TAG_NAME="${{ github.ref_name }}"
             IS_TAG="true"
+            VERSION_NAME="${TAG_NAME#v}"
           elif [ -n "${{ github.event.inputs.release_tag }}" ]; then
             TAG_NAME="${{ github.event.inputs.release_tag }}"
             IS_TAG="true"
+            VERSION_NAME="${TAG_NAME#v}"
           else
-            TAG_NAME="v2.0.0-dev.${{ github.run_number }}"
+            TAG_NAME="latest-apk"
             IS_TAG="false"
+            VERSION_NAME="2.0.0.${{ github.run_number }}"
           fi
-          VERSION_NAME="${TAG_NAME#v}"
           echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
           echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
           echo "version_code=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
@@ -96,16 +98,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish Tagged GitHub Release APK
-        if: steps.release_meta.outputs.is_tag_release == 'true'
+      - name: Publish Public GitHub Release APK
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_meta.outputs.tag_name }}
-          name: OMARVIO Browser Native Android APK (${{ steps.release_meta.outputs.tag_name }})
+          name: OMARVIO Browser Native Android APK (${{ steps.release_meta.outputs.version_name }})
           generate_release_notes: true
           make_latest: true
           body: |
-            ### ওমারভিও নেটিভ অ্যান্ড্রয়েড ব্রাউজার (${{ steps.release_meta.outputs.tag_name }})
+            ### ওমারভিও নেটিভ অ্যান্ড্রয়েড ব্রাউজার (${{ steps.release_meta.outputs.version_name }})
             - সরাসরি ডাউনলোড ও ফোন ইনস্টলযোগ্য `omarvio-browser.apk`
             - Android 15 / 16 / 17 সমর্থিত (`targetSdk 35`)
             - জিরো প্রক্সি বাধা: Google, YouTube, Facebook, DuckDuckGo, Bing সহ সব সাইট ১০০% সরাসরি লোড হয়।

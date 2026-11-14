@@ -21,7 +21,7 @@ import { SearchResultsView } from './SearchResultsView';
 import { SmartReaderView } from './SmartReaderView';
 import { downloadFileInApp } from '../engine/inAppDownloader';
 import { attachPassiveLinkInterceptor } from '../engine/linkInterceptor';
-import { enablePersistentStorage, prewarmFrequentSitesCache } from '../engine/swRegister';
+import { enablePersistentStorage } from '../engine/swRegister';
 import { putTabToSleep, wakeSleepingTab } from '../engine/tabManager';
 
 interface BrowserFrameProps {
@@ -217,10 +217,17 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
 
   const lastInternalNavUrlRef = useRef<string>('');
   const lastProcessedUrlRef = useRef<string>('');
+  const proxyHandshakeRef = useRef<boolean>(false);
 
   // 1. Listen to navigation & download events from inside the sandboxed iframe
   useEffect(() => {
     const handleWindowMessage = (e: MessageEvent) => {
+      if (e.data && e.data.type === 'OMARVIO_PROXY_READY') {
+        proxyHandshakeRef.current = true;
+        setHasError(false);
+        setIsOptimisticNavigating(false);
+        onLoadEndRef.current?.();
+      }
       if (e.data && e.data.type === 'OMARVIO_NAVIGATE' && typeof e.data.url === 'string') {
         const nextTarget = e.data.url;
         lastInternalNavUrlRef.current = nextTarget;
@@ -277,23 +284,9 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
     return () => window.removeEventListener('resize', updateScale);
   }, [isDesktopMode]);
 
-  // 3b. Request persistent local storage and prewarm YouTube & Facebook in Service Worker
+  // 3b. Request persistent local storage (without saturating mobile bandwidth with background site scraping)
   useEffect(() => {
     enablePersistentStorage().catch(() => {});
-
-    const prewarm = () => {
-      prewarmFrequentSitesCache([
-        'https://m.youtube.com',
-        'https://m.facebook.com',
-        'https://bn.m.wikipedia.org',
-      ]);
-    };
-
-    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-      (window as any).requestIdleCallback(prewarm);
-    } else {
-      setTimeout(prewarm, 1200);
-    }
   }, []);
 
   // 3c. Save site visit to frequent sites registry
@@ -316,6 +309,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
     if (!url) return;
 
     setHasError(false);
+    proxyHandshakeRef.current = false;
 
     // Instant local views complete in 0ms without network roundtrips
     if (isSearchResultsUrl) {
@@ -456,10 +450,27 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
   const handleIframeLoad = () => {
     setIsOptimisticNavigating(false);
     onLoadEndRef.current?.();
+
+    const frameSrc = activeFrameSrc || '';
+    const isProxyFrame = frameSrc.startsWith('/api/proxy');
+
     try {
       if (iframeRef.current && iframeRef.current.contentWindow) {
-        let loc = iframeRef.current.contentWindow.location.href;
+        const loc = iframeRef.current.contentWindow.location.href;
         if (loc && loc !== 'about:blank') {
+          if (loc.startsWith('chrome-error://') || loc === 'about:neterror') {
+            setHasError(true);
+            return;
+          }
+          // Detect blank body after proxy load when no handshake arrived
+          try {
+            const doc = iframeRef.current.contentDocument;
+            if (isProxyFrame && doc && doc.body && doc.body.children.length === 0 && !doc.body.innerText?.trim()) {
+              setHasError(true);
+              return;
+            }
+          } catch {}
+
           // If the location is the proxy route, extract the real underlying target URL
           if (loc.includes('/api/proxy?url=')) {
             try {
@@ -489,7 +500,11 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
         }
       }
     } catch {
-      // Cross-origin boundary active (normal for sandboxed frames)
+      // If a /api/proxy same-origin frame threw SecurityError on contentWindow.location.href,
+      // it means it escaped the proxy or hit a blocked chrome-error:// X-Frame-Options sad-page!
+      if (isProxyFrame && !proxyHandshakeRef.current && !currentYtId) {
+        setHasError(true);
+      }
     }
   };
 
@@ -614,13 +629,33 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
 
             <button
               type="button"
-              onClick={() => {
+              onClick={async () => {
+                const safeTitle = (() => {
+                  try {
+                    return new URL(url.startsWith('http') ? url : `https://${url}`).hostname;
+                  } catch {
+                    return 'Web Article';
+                  }
+                })();
                 setReaderArticle({
-                  title: url ? new URL(url).hostname : 'Web Article',
+                  title: safeTitle,
                   url: url,
-                  content: `ওয়েবসাইট লিংক: ${url}\n\nএই পেজটি ওমারভিও ক্লিন রিডার ইঞ্জিন দিয়ে প্রস্তুত করা হয়েছে। সমস্ত বিজ্ঞাপন, স্পাই ট্র্যাকার ও পপ-আপ স্বয়ংক্রিয়ভাবে মুছে ফেলে পাঠযোগ্য অংশটি আপনার জন্য সাজানো হয়েছে।\n\nআপনি চাইলে অফলাইন সেভ বাটন দিয়ে পেজটি ডিভাইসে সংরক্ষণ করতে পারেন।`,
+                  content: 'মূল আর্টিকেল ওমারভিও ক্লিন রিডার ইঞ্জিনে লোড হচ্ছে...',
                 });
                 setIsReaderModeActive(true);
+                try {
+                  const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}&reader=1`);
+                  if (res.ok) {
+                    const data = await res.json();
+                    if (data?.content) {
+                      setReaderArticle({
+                        title: data.title || safeTitle,
+                        url: data.url || url,
+                        content: data.content,
+                      });
+                    }
+                  }
+                } catch {}
               }}
               className="w-full py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-500/40 text-cyan-200 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md"
             >

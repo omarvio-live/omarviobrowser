@@ -21,18 +21,18 @@ let trackerListeners: TrackerCallback[] = [];
  * Cache Name Constants for Multi-Tier Storage Architecture
  */
 export const CACHE_NAMES = {
-  SHELL: 'omarvio-shell-v6',
-  STATIC: 'omarvio-static-v6',
-  VENDOR: 'omarvio-vendor-v6',
-  ASSET: 'omarvio-asset-cache-v6',
-  NAV: 'omarvio-nav-cache-v2',
+  SHELL: 'omarvio-shell-v7',
+  STATIC: 'omarvio-static-v7',
+  VENDOR: 'omarvio-vendor-v7',
+  ASSET: 'omarvio-asset-cache-v7',
+  NAV: 'omarvio-nav-cache-v3',
 } as const;
 
 /**
  * Common Vendor Libraries and immutable CDN assets to permanently cache
  */
 export const COMMON_VENDOR_LIBRARIES: string[] = [
-  'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap',
+  'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap',
   'https://fonts.gstatic.com',
   '/manifest.json',
 ];
@@ -44,7 +44,8 @@ export const APP_STATIC_ASSETS: string[] = [
   '/',
   '/index.html',
   '/manifest.json',
-  '/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png',
+  '/assets/omarvio-logo-256.webp',
+  '/assets/omarvio-icon-192.png',
 ];
 
 /**
@@ -243,9 +244,7 @@ export const initPersistentCacheStrategies = () => {
   const runWarmup = async () => {
     await enablePersistentStorage();
     await purgeExpiredCaches();
-    await cacheVendorLibraries();
     await cacheStaticAssets();
-    await prewarmFrequentSitesCache();
   };
 
   if ('requestIdleCallback' in window) {

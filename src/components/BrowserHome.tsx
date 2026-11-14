@@ -413,8 +413,10 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
         {/* ============================================================== */}
         <div className="flex flex-col items-center mb-6 relative z-10 text-center select-none">
           <img
-            src="/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png"
+            src="/assets/omarvio-logo-256.webp"
             alt="OMARVIO BROWSER Logo"
+            decoding="sync"
+            fetchPriority="high"
             className="w-20 h-20 sm:w-24 sm:h-24 aspect-square rounded-2xl object-contain bg-black shadow-2xl shadow-cyan-950/50 mb-3"
           />
           <div className="flex items-center gap-1.5 mb-1">

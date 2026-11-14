@@ -1839,7 +1839,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
             <div className="space-y-4 text-center animate-fadeIn">
               <div className="flex flex-col items-center">
                 <img
-                  src="/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png"
+                  src="/assets/omarvio-logo-256.webp"
                   alt="OMARVIO BROWSER Logo"
                   className="w-24 h-24 aspect-square rounded-2xl object-contain bg-black shadow-2xl mb-3"
                 />

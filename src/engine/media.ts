@@ -57,8 +57,8 @@ export const updateLockScreenMediaSession = (meta: {
       album: meta.album || 'My Phone, My Data',
       artwork: [
         {
-          src: meta.artworkUrl || '/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png',
-          sizes: '1254x1254',
+          src: meta.artworkUrl || '/assets/omarvio-icon-192.png',
+          sizes: '192x192',
           type: 'image/png',
         },
       ],
