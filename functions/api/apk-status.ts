@@ -11,10 +11,11 @@ interface Env {
   KV?: any;
   OMARVIO_APK_URL?: string;
   OMARVIO_GITHUB_REPO?: string;
+  ASSETS?: { fetch: (input: RequestInfo | URL) => Promise<Response> };
 }
 
 export const onRequest: PagesFunction<Env> = async (context) => {
-  const { env } = context;
+  const { request, env } = context;
   const kv = env.KV_BINDING || env.OMARVIO_KV || env.KV;
 
   let kvRepo = '';
@@ -25,10 +26,24 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     } catch {}
   }
 
-  const envApkUrl = (env.OMARVIO_APK_URL || '').trim();
-  const envRepo = (env.OMARVIO_GITHUB_REPO || kvRepo || '')
+  let manifestRepo = '';
+  let manifestApkUrl = '';
+  if (env.ASSETS) {
+    try {
+      const assetRes = await env.ASSETS.fetch(new URL('/apk-release.json', request.url));
+      if (assetRes.ok) {
+        const manifest = (await assetRes.json()) as { repo?: string; apkUrl?: string };
+        manifestRepo = (manifest.repo || '').trim();
+        manifestApkUrl = (manifest.apkUrl || '').trim();
+      }
+    } catch {}
+  }
+
+  const envApkUrl = (env.OMARVIO_APK_URL || manifestApkUrl || '').trim();
+  const envRepo = (env.OMARVIO_GITHUB_REPO || kvRepo || manifestRepo || '')
     .trim()
     .replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/\.git$/i, '')
     .replace(/\/+$/, '');
   const githubReleaseUrl =
     envApkUrl || (envRepo ? `https://github.com/${envRepo}/releases/latest/download/omarvio-browser.apk` : '');

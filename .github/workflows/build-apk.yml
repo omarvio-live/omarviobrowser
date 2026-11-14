@@ -130,3 +130,31 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync Public APK Link File
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          REPO_SLUG: ${{ github.repository }}
+          APP_VERSION: ${{ steps.release_meta.outputs.version_name }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const repo = process.env.REPO_SLUG || "";
+            const data = {
+              repo,
+              apkUrl: repo ? `https://github.com/${repo}/releases/latest/download/omarvio-browser.apk` : "",
+              version: process.env.APP_VERSION || "2.0.0",
+              host: "github-releases",
+              updatedAt: new Date().toISOString()
+            };
+            fs.writeFileSync("public/apk-release.json", JSON.stringify(data, null, 2) + "\n");
+          '
+          git config user.name "omarvio-release-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add public/apk-release.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update public APK release link [skip ci]"
+            BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+            git pull --rebase origin "$BRANCH_NAME" || true
+            git push origin "HEAD:$BRANCH_NAME" || echo "Manifest sync skipped cleanly"
+          fi
