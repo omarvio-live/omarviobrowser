@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Native browser networking and media features -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -23,8 +24,10 @@
         android:usesCleartextTraffic="false"
         tools:targetApi="35">
 
+        <!-- Keep the native browser engine as the app entry point. The separate
+             website wrapper must not replace the native browser activity. -->
         <activity
-            android:name=".UnifiedBrowserActivity"
+            android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.OmarVioBrowser"
