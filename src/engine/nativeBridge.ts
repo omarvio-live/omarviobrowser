@@ -10,7 +10,11 @@
 import { getSanitizedSearchUrl } from './adblocker';
 
 export interface OmarvioAndroidBridge {
-  openUrl: (url: string) => void;
+  openUrl: (url: string, isIncognito?: boolean) => void;
+  openIncognitoHome?: () => void;
+  setSearchEngine?: (engineId: string) => void;
+  setDesktopMode?: (enabled: boolean) => void;
+  clearAllData?: () => void;
   getAppVersion?: () => string;
   getBlockedCount?: () => number;
 }
@@ -75,16 +79,37 @@ export function resolveNavigableUrl(rawUrl: string): string {
   return getSanitizedSearchUrl(trimmed, engine);
 }
 
-export function openUrlInNativeAndroid(rawUrl: string): boolean {
+export function openUrlInNativeAndroid(rawUrl: string, isIncognito = false): boolean {
   if (typeof window === 'undefined') return false;
   const bridge = window.OmarvioAndroid;
   if (!bridge || typeof bridge.openUrl !== 'function') return false;
   const resolved = resolveNavigableUrl(rawUrl);
   if (!resolved) return false;
   try {
-    bridge.openUrl(resolved);
+    bridge.openUrl(resolved, isIncognito);
     return true;
   } catch {
     return false;
   }
+}
+
+export function syncSearchEngineWithAndroid(engineId: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.OmarvioAndroid?.setSearchEngine?.(engineId);
+  } catch {}
+}
+
+export function syncDesktopModeWithAndroid(enabled: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.OmarvioAndroid?.setDesktopMode?.(enabled);
+  } catch {}
+}
+
+export function clearNativeAndroidBrowsingData(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.OmarvioAndroid?.clearAllData?.();
+  } catch {}
 }

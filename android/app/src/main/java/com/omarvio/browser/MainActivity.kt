@@ -22,8 +22,8 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
+import android.webkit.WebStorage
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -40,6 +40,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -59,6 +61,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -70,16 +73,20 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
 private const val CLOUDFLARE_HOME_URL = "https://omarvio-browser.pages.dev/?androidShell=1"
+private const val CLOUDFLARE_SETTINGS_URL = "https://omarvio-browser.pages.dev/?androidShell=1&openSettings=1"
 private const val APK_STATUS_API_URL = "https://omarvio-browser.pages.dev/api/apk-status"
+private const val PREFS_NAME = "omarvio_browser_prefs"
 
 private const val MOBILE_USER_AGENT =
     "Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -97,7 +104,23 @@ private data class NativeShortcut(
 private data class NativeSearchEngine(
     val id: String,
     val label: String,
+    val subtitle: String,
+    val badge: String,
+    val badgeColor: Color,
     val searchBase: String
+)
+
+private data class BrowserTabState(
+    val id: String,
+    val title: String = "New Tab",
+    val url: String = "",
+    val isIncognito: Boolean = false,
+    val isDesktopMode: Boolean = false
+)
+
+private data class SavedEntry(
+    val title: String,
+    val url: String
 )
 
 private data class AppUpdateInfo(
@@ -107,13 +130,34 @@ private data class AppUpdateInfo(
 
 private class OmarvioJsBridge(
     private val appVersion: String,
-    private val onOpenExternalUrl: (String) -> Unit
+    private val onOpenExternalUrl: (String, Boolean) -> Unit,
+    private val onSetEngine: (String) -> Unit,
+    private val onSetDesktop: (Boolean) -> Unit,
+    private val onClearData: () -> Unit
 ) {
     @JavascriptInterface
     fun openUrl(url: String) {
-        if (url.isNotBlank()) {
-            onOpenExternalUrl(url)
-        }
+        if (url.isNotBlank()) onOpenExternalUrl(url, false)
+    }
+
+    @JavascriptInterface
+    fun openUrl(url: String, isIncognito: Boolean) {
+        if (url.isNotBlank()) onOpenExternalUrl(url, isIncognito)
+    }
+
+    @JavascriptInterface
+    fun setSearchEngine(engineId: String) {
+        if (engineId.isNotBlank()) onSetEngine(engineId)
+    }
+
+    @JavascriptInterface
+    fun setDesktopMode(enabled: Boolean) {
+        onSetDesktop(enabled)
+    }
+
+    @JavascriptInterface
+    fun clearAllData() {
+        onClearData()
     }
 
     @JavascriptInterface
@@ -143,14 +187,14 @@ class MainActivity : ComponentActivity() {
     private var externalIntentUrlState = mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        val navBarDarkColor = AndroidColor.parseColor("#0B1329")
+        val topBarColor = AndroidColor.parseColor("#18191C")
+        val bottomBarColor = AndroidColor.parseColor("#0B1329")
         enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(navBarDarkColor),
-            navigationBarStyle = SystemBarStyle.dark(navBarDarkColor)
+            statusBarStyle = SystemBarStyle.dark(topBarColor),
+            navigationBarStyle = SystemBarStyle.dark(bottomBarColor)
         )
         super.onCreate(savedInstanceState)
 
-        // Explicitly enable hardware acceleration on Window level for 60fps PWA & Chromium rendering
         window.setFlags(
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
@@ -199,10 +243,6 @@ class MainActivity : ComponentActivity() {
         return null
     }
 
-    /**
-     * Intercept physical back key events at the Activity level when not handled by Compose BackHandler,
-     * triggering WebBackForwardList history navigation step-by-step instead of exiting prematurely.
-     */
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == KeyEvent.KEYCODE_BACK && event?.repeatCount == 0 && !isCurrentlyHome) {
             onBackPressedDispatcher.onBackPressed()
@@ -242,6 +282,8 @@ fun OmarVioBrowserApp(
     onDownloadFile: (String, String, String?, String?) -> Unit
 ) {
     val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
+
     val installedVersion = remember {
         try {
             @Suppress("DEPRECATION")
@@ -250,6 +292,44 @@ fun OmarVioBrowserApp(
             "2.0.0"
         }
     }
+
+    val engines = remember {
+        listOf(
+            NativeSearchEngine("brave", "Brave", "ট্র্যাকারমুক্ত গোপনীয় সার্চ", "Privacy Default", Color(0xFFFB542B), "https://search.brave.com/search?q="),
+            NativeSearchEngine("google", "Google", "দ্রুত গতির রেজাল্ট", "Popular", Color(0xFF4285F4), "https://www.google.com/search?q="),
+            NativeSearchEngine("duckduckgo", "DuckDuckGo", "ট্র্যাকারমুক্ত গোপনীয় সার্চ", "Zero Tracking", Color(0xFFDE5833), "https://duckduckgo.com/?q="),
+            NativeSearchEngine("firefox", "Firefox", "ট্র্যাকারমুক্ত গোপনীয় সার্চ", "Mozilla", Color(0xFFFF7139), "https://duckduckgo.com/?t=ffab&q="),
+            NativeSearchEngine("bing", "Bing", "দ্রুত গতির রেজাল্ট", "Microsoft", Color(0xFF008373), "https://www.bing.com/search?q="),
+            NativeSearchEngine("startpage", "Startpage", "ট্র্যাকারমুক্ত গোপনীয় সার্চ", "Private Google", Color(0xFF2563EB), "https://www.startpage.com/sp/search?q="),
+            NativeSearchEngine("ecosia", "Ecosia", "পরিবেশবান্ধব গ্রিন সার্চ", "Trees", Color(0xFF10B981), "https://www.ecosia.org/search?q=")
+        )
+    }
+
+    val shortcuts = remember {
+        listOf(
+            NativeShortcut("Google", "https://www.google.com", "G", Color.White, Color(0xFF4285F4)),
+            NativeShortcut("YouTube", "https://m.youtube.com", "▶", Color(0xFFFF0000)),
+            NativeShortcut("Facebook", "https://m.facebook.com", "f", Color(0xFF1877F2)),
+            NativeShortcut("Wikipedia", "https://bn.m.wikipedia.org", "W", Color.White, Color(0xFF0F172A)),
+            NativeShortcut("DuckDuckGo", "https://duckduckgo.com", "D", Color(0xFFDE5833)),
+            NativeShortcut("Bing", "https://www.bing.com", "B", Color.White, Color(0xFF008373)),
+            NativeShortcut("Firefox", "https://www.mozilla.org", "🦊", Color(0xFFFF7139)),
+            NativeShortcut("প্রথম আলো", "https://www.prothomalo.com", "PA", Color(0xFF0A192F), Color(0xFFFB7185))
+        )
+    }
+
+    // Multi-Tab State
+    val tabs = remember {
+        mutableStateListOf(
+            BrowserTabState(
+                id = "tab-1",
+                url = externalLaunchUrl ?: "",
+                title = if (externalLaunchUrl != null) externalLaunchUrl else "New Tab"
+            )
+        )
+    }
+    var activeTabIndex by remember { mutableIntStateOf(0) }
+    val activeTab = tabs.getOrNull(activeTabIndex) ?: tabs.first()
 
     var isHomeVisible by remember { mutableStateOf(externalLaunchUrl == null) }
     var currentUrl by remember { mutableStateOf(externalLaunchUrl ?: "") }
@@ -260,12 +340,74 @@ fun OmarVioBrowserApp(
     var canGoBack by remember { mutableStateOf(false) }
     var canGoForward by remember { mutableStateOf(false) }
     var isDesktopMode by remember { mutableStateOf(false) }
-    var selectedEngineId by remember { mutableStateOf("google") }
+    var selectedEngineId by remember {
+        mutableStateOf(prefs.getString("selected_engine", "google") ?: "google")
+    }
     val blockedCount by AdBlockEngine.blockedCountFlow.collectAsState()
     var internalWebView: WebView? by remember { mutableStateOf(null) }
 
-    // Synced Web Home UI state + Auto-Update state
+    // Persisted Bookmarks & History
+    val bookmarks = remember {
+        mutableStateListOf<SavedEntry>().apply {
+            val raw = prefs.getString("bookmarks_json", "[]") ?: "[]"
+            try {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    add(SavedEntry(obj.optString("title"), obj.optString("url")))
+                }
+            } catch (_: Exception) {}
+        }
+    }
+    val historyList = remember {
+        mutableStateListOf<SavedEntry>().apply {
+            val raw = prefs.getString("history_json", "[]") ?: "[]"
+            try {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    add(SavedEntry(obj.optString("title"), obj.optString("url")))
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun persistBookmarks() {
+        val arr = JSONArray()
+        bookmarks.forEach { b ->
+            arr.put(JSONObject().apply { put("title", b.title); put("url", b.url) })
+        }
+        prefs.edit().putString("bookmarks_json", arr.toString()).apply()
+    }
+
+    fun persistHistory() {
+        val arr = JSONArray()
+        historyList.take(80).forEach { h ->
+            arr.put(JSONObject().apply { put("title", h.title); put("url", h.url) })
+        }
+        prefs.edit().putString("history_json", arr.toString()).apply()
+    }
+
+    fun addHistoryEntry(title: String, url: String) {
+        if (activeTab.isIncognito || url.isBlank() || url.startsWith("https://omarvio-browser.pages.dev")) return
+        historyList.removeAll { it.url == url }
+        historyList.add(0, SavedEntry(title.ifBlank { url }, url))
+        if (historyList.size > 80) historyList.removeAt(historyList.lastIndex)
+        persistHistory()
+    }
+
+    // Chrome-style Modals & Overlays when browsing
+    var showChromeMenu by remember { mutableStateOf(false) }
+    var showEngineModal by remember { mutableStateOf(false) }
+    var showTabsModal by remember { mutableStateOf(false) }
+    var showBookmarksModal by remember { mutableStateOf(false) }
+    var showHistoryModal by remember { mutableStateOf(false) }
+    var showFindBar by remember { mutableStateOf(false) }
+    var findQuery by remember { mutableStateOf("") }
+
+    // Synced Web Home UI + Auto-Update
     var homeWebView: WebView? by remember { mutableStateOf(null) }
+    var homeTargetUrl by remember { mutableStateOf(CLOUDFLARE_HOME_URL) }
     var homeWebFailed by remember { mutableStateOf(false) }
     var availableUpdate by remember { mutableStateOf<AppUpdateInfo?>(null) }
 
@@ -298,30 +440,16 @@ fun OmarVioBrowserApp(
         callback.onReceiveValue(uris)
     }
 
-    val engines = remember {
-        listOf(
-            NativeSearchEngine("google", "Google", "https://www.google.com/search?q="),
-            NativeSearchEngine("duckduckgo", "DuckDuckGo", "https://duckduckgo.com/?q="),
-            NativeSearchEngine("bing", "Bing", "https://www.bing.com/search?q="),
-            NativeSearchEngine("brave", "Brave", "https://search.brave.com/search?q="),
-            NativeSearchEngine("wiki", "Wikipedia", "https://bn.m.wikipedia.org/wiki/Special:Search?search=")
+    fun selectSearchEngine(engineId: String) {
+        selectedEngineId = engineId
+        prefs.edit().putString("selected_engine", engineId).apply()
+        homeWebView?.evaluateJavascript(
+            "try{localStorage.setItem('omarvio_search_engine','$engineId');}catch(e){}",
+            null
         )
     }
 
-    val shortcuts = remember {
-        listOf(
-            NativeShortcut("Google", "https://www.google.com", "G", Color.White, Color(0xFF4285F4)),
-            NativeShortcut("YouTube", "https://m.youtube.com", "▶", Color(0xFFFF0000)),
-            NativeShortcut("Facebook", "https://m.facebook.com", "f", Color(0xFF1877F2)),
-            NativeShortcut("Wikipedia", "https://bn.m.wikipedia.org", "W", Color.White, Color(0xFF0F172A)),
-            NativeShortcut("DuckDuckGo", "https://duckduckgo.com", "D", Color(0xFFDE5833)),
-            NativeShortcut("Bing", "https://www.bing.com", "B", Color.White, Color(0xFF008373)),
-            NativeShortcut("Firefox", "https://www.mozilla.org", "🦊", Color(0xFFFF7139)),
-            NativeShortcut("প্রথম আলো", "https://www.prothomalo.com", "PA", Color(0xFF0A192F), Color(0xFFFB7185))
-        )
-    }
-
-    fun navigateToUrl(rawInput: String) {
+    fun navigateToUrl(rawInput: String, incognitoOverride: Boolean? = null) {
         val trimmed = rawInput.trim()
         if (trimmed.isEmpty()) return
 
@@ -336,6 +464,11 @@ fun OmarVioBrowserApp(
             "${activeEngine.searchBase}${Uri.encode(trimmed)}"
         }
 
+        val currentIdx = activeTabIndex.coerceIn(0, tabs.lastIndex)
+        val cur = tabs[currentIdx]
+        val finalIncognito = incognitoOverride ?: cur.isIncognito
+        tabs[currentIdx] = cur.copy(url = target, title = target, isIncognito = finalIncognito)
+
         isHomeVisible = false
         onHomeVisibilityChanged(false)
         currentUrl = target
@@ -344,26 +477,107 @@ fun OmarVioBrowserApp(
         internalWebView?.loadUrl(target)
     }
 
-    fun goToHome() {
+    fun goToHome(homeUrl: String = CLOUDFLARE_HOME_URL) {
+        homeTargetUrl = homeUrl
+        val currentIdx = activeTabIndex.coerceIn(0, tabs.lastIndex)
+        tabs[currentIdx] = tabs[currentIdx].copy(url = "", title = "New Tab")
         isHomeVisible = true
         onHomeVisibilityChanged(true)
         inputUrl = ""
+        currentUrl = ""
+        showFindBar = false
     }
 
-    fun toggleDesktopMode() {
-        isDesktopMode = !isDesktopMode
+    fun createNewTab(incognito: Boolean = false) {
+        val newTab = BrowserTabState(
+            id = "tab-${System.currentTimeMillis()}",
+            title = if (incognito) "Incognito Tab" else "New Tab",
+            url = "",
+            isIncognito = incognito,
+            isDesktopMode = isDesktopMode
+        )
+        tabs.add(newTab)
+        activeTabIndex = tabs.lastIndex
+        goToHome()
+    }
+
+    fun switchToTab(idx: Int) {
+        if (idx !in tabs.indices) return
+        activeTabIndex = idx
+        val target = tabs[idx]
+        isDesktopMode = target.isDesktopMode
+        if (target.url.isBlank()) {
+            isHomeVisible = true
+            onHomeVisibilityChanged(true)
+            currentUrl = ""
+            inputUrl = ""
+        } else {
+            isHomeVisible = false
+            onHomeVisibilityChanged(false)
+            currentUrl = target.url
+            inputUrl = target.url
+            internalWebView?.settings?.userAgentString =
+                if (target.isDesktopMode) DESKTOP_USER_AGENT else MOBILE_USER_AGENT
+            internalWebView?.loadUrl(target.url)
+        }
+    }
+
+    fun closeTabAt(idx: Int) {
+        if (tabs.size <= 1) {
+            tabs[0] = BrowserTabState(id = "tab-${System.currentTimeMillis()}")
+            activeTabIndex = 0
+            goToHome()
+            return
+        }
+        tabs.removeAt(idx)
+        val nextIdx = idx.coerceAtMost(tabs.lastIndex)
+        switchToTab(nextIdx)
+    }
+
+    fun toggleDesktopMode(forceState: Boolean? = null) {
+        val next = forceState ?: !isDesktopMode
+        isDesktopMode = next
+        val currentIdx = activeTabIndex.coerceIn(0, tabs.lastIndex)
+        tabs[currentIdx] = tabs[currentIdx].copy(isDesktopMode = next)
         internalWebView?.let { wv ->
-            wv.settings.userAgentString = if (isDesktopMode) DESKTOP_USER_AGENT else MOBILE_USER_AGENT
+            wv.settings.userAgentString = if (next) DESKTOP_USER_AGENT else MOBILE_USER_AGENT
             wv.settings.useWideViewPort = true
             wv.settings.loadWithOverviewMode = true
             if (!isHomeVisible) wv.reload()
         }
     }
 
+    fun clearAllBrowserData() {
+        historyList.clear()
+        persistHistory()
+        try {
+            internalWebView?.clearCache(true)
+            internalWebView?.clearHistory()
+            internalWebView?.clearFormData()
+            CookieManager.getInstance().removeAllCookies(null)
+            CookieManager.getInstance().flush()
+            WebStorage.getInstance().deleteAllData()
+        } catch (_: Exception) {}
+        Toast.makeText(context, "🗑️ ব্রাউজিং হিস্ট্রি, কুকি ও ক্যাশ মুছে ফেলা হয়েছে", Toast.LENGTH_SHORT).show()
+    }
+
+    fun toggleBookmarkCurrent() {
+        val targetUrl = currentUrl.trim()
+        if (targetUrl.isBlank()) return
+        val existingIdx = bookmarks.indexOfFirst { it.url == targetUrl }
+        if (existingIdx >= 0) {
+            bookmarks.removeAt(existingIdx)
+            Toast.makeText(context, "বুকমার্ক সরানো হয়েছে", Toast.LENGTH_SHORT).show()
+        } else {
+            bookmarks.add(0, SavedEntry(pageTitle.ifBlank { targetUrl }, targetUrl))
+            Toast.makeText(context, "★ বুকমার্ক সেভ করা হয়েছে", Toast.LENGTH_SHORT).show()
+        }
+        persistBookmarks()
+    }
+
     LaunchedEffect(Unit) {
         onRegisterReturnHome { goToHome() }
 
-        // Background APK Auto-Update Check against Cloudflare /api/apk-status
         val foundUpdate = withContext(Dispatchers.IO) {
             try {
                 val conn = (URL(APK_STATUS_API_URL).openConnection() as HttpURLConnection).apply {
@@ -400,175 +614,139 @@ fun OmarVioBrowserApp(
         }
     }
 
-    // Step-by-step Back Navigation Handler in Compose
-    BackHandler(enabled = !isHomeVisible || fullscreenView != null) {
-        if (fullscreenView != null) {
-            fullscreenCallback?.onCustomViewHidden()
-            fullscreenView = null
-            fullscreenCallback = null
-            return@BackHandler
-        }
-
-        val wv = internalWebView
-        if (wv != null && WebBackNavigationManager.navigateBack(wv)) {
-            canGoBack = WebBackNavigationManager.canNavigateBack(wv)
-            canGoForward = WebBackNavigationManager.canNavigateForward(wv)
-        } else {
-            goToHome()
+    BackHandler(enabled = showChromeMenu || showEngineModal || showTabsModal || showBookmarksModal || showHistoryModal || showFindBar || !isHomeVisible || fullscreenView != null) {
+        when {
+            fullscreenView != null -> {
+                fullscreenCallback?.onCustomViewHidden()
+                fullscreenView = null
+                fullscreenCallback = null
+            }
+            showChromeMenu -> showChromeMenu = false
+            showEngineModal -> showEngineModal = false
+            showTabsModal -> showTabsModal = false
+            showBookmarksModal -> showBookmarksModal = false
+            showHistoryModal -> showHistoryModal = false
+            showFindBar -> {
+                showFindBar = false
+                internalWebView?.clearMatches()
+            }
+            else -> {
+                val wv = internalWebView
+                if (wv != null && WebBackNavigationManager.navigateBack(wv)) {
+                    canGoBack = WebBackNavigationManager.canNavigateBack(wv)
+                    canGoForward = WebBackNavigationManager.canNavigateForward(wv)
+                } else {
+                    goToHome()
+                }
+            }
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF070913))) {
+    val isCurrentBookmarked = bookmarks.any { it.url == currentUrl }
+    val activeEngine = engines.firstOrNull { it.id == selectedEngineId } ?: engines.first()
+
+    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF060913))) {
         Column(modifier = Modifier.fillMaxSize().imePadding()) {
-            // Top Chrome-style Slim Header with explicit statusBarsPadding so Android status bar never overlaps
-            Surface(color = Color(0xFF0B1329), modifier = Modifier.fillMaxWidth()) {
-                Column(
+            // Top Area: When live synced Home WebView is active, provide clean statusBarsPadding spacer ONLY (zero duplicate header!)
+            // When browsing a webpage OR using offline fallback, render the clean Chrome Android Top Omnibox Bar!
+            if (isHomeVisible && !homeWebFailed) {
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .background(Color(0xFF18191C))
                         .statusBarsPadding()
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                ) {
-                    if (isHomeVisible) {
-                        // Clean single-row home header
-                        Row(
-                            modifier = Modifier.fillMaxWidth().height(40.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                )
+            } else {
+                Surface(color = Color(0xFF18191C), modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .padding(horizontal = 8.dp, vertical = 8.dp)
+                            .height(44.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        IconButton(
+                            onClick = { goToHome() },
+                            modifier = Modifier.size(38.dp)
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Image(
-                                    painter = painterResource(id = R.drawable.omarvio_logo),
-                                    contentDescription = "OMARVIO BROWSER",
-                                    contentScale = ContentScale.Fit,
-                                    modifier = Modifier
-                                        .size(30.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Color.Black)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "OMARVIO BROWSER",
-                                    color = Color(0xFFF1F5F9),
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp,
-                                    maxLines = 1
-                                )
-                            }
-
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Color(0xFF131B2E))
-                                        .clickable { toggleDesktopMode() }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = if (isDesktopMode) Icons.Default.Laptop else Icons.Default.Smartphone,
-                                        contentDescription = "Mode",
-                                        tint = if (isDesktopMode) Color(0xFF38BDF8) else Color(0xFF94A3B8),
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(5.dp))
-                                    Text(
-                                        text = if (isDesktopMode) "Desktop" else "Mobile",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = if (isDesktopMode) Color(0xFF38BDF8) else Color(0xFFCBD5E1)
-                                    )
-                                }
-
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        Icons.Default.Shield,
-                                        contentDescription = "AdBlock",
-                                        tint = Color(0xFF10B981),
-                                        modifier = Modifier.size(15.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = "$blockedCount ব্লকড",
-                                        color = Color(0xFF34D399),
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-                            }
+                            Icon(
+                                Icons.Default.Home,
+                                contentDescription = "Home",
+                                tint = Color(0xFF38BDF8),
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
-                    } else {
-                        // Active Webpage 1-Row Slim Omnibox Bar
-                        Row(
-                            modifier = Modifier.fillMaxWidth().height(44.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            IconButton(
-                                onClick = { goToHome() },
-                                modifier = Modifier.size(38.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Home,
-                                    contentDescription = "Home",
-                                    tint = Color(0xFF38BDF8),
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
 
-                            Row(
+                        // Rounded Omnibox with SSL / Incognito indicator + Search Engine badge + Clear + Reload
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(if (activeTab.isIncognito) Color(0xFF231936) else Color(0xFF28292C))
+                                .border(
+                                    1.dp,
+                                    if (activeTab.isIncognito) Color(0xFF7E22CE).copy(alpha = 0.6f) else Color(0xFF3C4043),
+                                    RoundedCornerShape(20.dp)
+                                )
+                                .padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = when {
+                                    activeTab.isIncognito -> Icons.Default.VisibilityOff
+                                    !isHomeVisible && currentUrl.startsWith("https") -> Icons.Default.Lock
+                                    else -> Icons.Default.Search
+                                },
+                                contentDescription = "Status",
+                                tint = when {
+                                    activeTab.isIncognito -> Color(0xFFC084FC)
+                                    !isHomeVisible && currentUrl.startsWith("https") -> Color(0xFF10B981)
+                                    else -> Color(0xFF9AA0A6)
+                                },
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .height(40.dp)
-                                    .clip(RoundedCornerShape(20.dp))
-                                    .background(Color(0xFF131B2E))
-                                    .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(20.dp))
-                                    .padding(horizontal = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    if (currentUrl.startsWith("https")) Icons.Default.Lock else Icons.Default.Search,
-                                    contentDescription = "Security",
-                                    tint = if (currentUrl.startsWith("https")) Color(0xFF10B981) else Color(0xFF94A3B8),
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                BasicTextField(
-                                    value = inputUrl,
-                                    onValueChange = { inputUrl = it },
-                                    singleLine = true,
-                                    textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
-                                    cursorBrush = SolidColor(Color(0xFF22D3EE)),
-                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                                    keyboardActions = KeyboardActions(onGo = { navigateToUrl(inputUrl) }),
-                                    modifier = Modifier.weight(1f),
-                                    decorationBox = { innerTextField ->
-                                        if (inputUrl.isEmpty()) {
-                                            Text(
-                                                "সার্চ বা ওয়েব ঠিকানা লিখুন...",
-                                                color = Color(0xFF64748B),
-                                                fontSize = 13.sp,
-                                                maxLines = 1
-                                            )
-                                        }
-                                        innerTextField()
-                                    }
-                                )
-                                if (inputUrl.isNotEmpty()) {
-                                    IconButton(
-                                        onClick = { inputUrl = "" },
-                                        modifier = Modifier.size(28.dp)
-                                    ) {
-                                        Icon(
-                                            Icons.Default.Close,
-                                            contentDescription = "Clear",
-                                            tint = Color(0xFF94A3B8),
-                                            modifier = Modifier.size(14.dp)
+                                    .size(16.dp)
+                                    .clickable { showEngineModal = true }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            BasicTextField(
+                                value = inputUrl,
+                                onValueChange = { inputUrl = it },
+                                singleLine = true,
+                                textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+                                cursorBrush = SolidColor(Color(0xFF22D3EE)),
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                                keyboardActions = KeyboardActions(onGo = { navigateToUrl(inputUrl) }),
+                                modifier = Modifier.weight(1f),
+                                decorationBox = { innerTextField ->
+                                    if (inputUrl.isEmpty()) {
+                                        Text(
+                                            text = "${activeEngine.label}-এ সার্চ বা URL লিখুন...",
+                                            color = Color(0xFF9AA0A6),
+                                            fontSize = 13.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
+                                    innerTextField()
                                 }
+                            )
+                            if (inputUrl.isNotEmpty()) {
+                                IconButton(
+                                    onClick = { inputUrl = "" },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "Clear",
+                                        tint = Color(0xFF9AA0A6),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                            }
+                            if (!isHomeVisible) {
                                 IconButton(
                                     onClick = { internalWebView?.reload() },
                                     modifier = Modifier.size(28.dp)
@@ -576,23 +754,42 @@ fun OmarVioBrowserApp(
                                     Icon(
                                         Icons.Default.Refresh,
                                         contentDescription = "Reload",
-                                        tint = if (isLoading) Color(0xFF22D3EE) else Color(0xFFCBD5E1),
+                                        tint = if (isLoading) Color(0xFF22D3EE) else Color(0xFFE3E3E3),
                                         modifier = Modifier.size(16.dp)
                                     )
                                 }
                             }
+                        }
 
-                            IconButton(
-                                onClick = { toggleDesktopMode() },
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (isDesktopMode) Icons.Default.Laptop else Icons.Default.Smartphone,
-                                    contentDescription = "Toggle Desktop Mode",
-                                    tint = if (isDesktopMode) Color(0xFF38BDF8) else Color(0xFF94A3B8),
-                                    modifier = Modifier.size(19.dp)
-                                )
-                            }
+                        // Tab Switcher Counter [N]
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF28292C))
+                                .border(1.5.dp, Color(0xFF5F6368), RoundedCornerShape(8.dp))
+                                .clickable { showTabsModal = true },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "${tabs.size}",
+                                color = Color(0xFFE3E3E3),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        // Chrome-style 3-Dot Overflow Menu
+                        IconButton(
+                            onClick = { showChromeMenu = true },
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = "More Options",
+                                tint = Color(0xFFE3E3E3),
+                                modifier = Modifier.size(22.dp)
+                            )
                         }
                     }
                 }
@@ -665,6 +862,48 @@ fun OmarVioBrowserApp(
                 }
             }
 
+            // Find in Page Bar (when triggered from 3-dot menu)
+            AnimatedVisibility(visible = showFindBar && !isHomeVisible) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF202124))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(Icons.Default.Search, contentDescription = null, tint = Color(0xFF9AA0A6), modifier = Modifier.size(18.dp))
+                    BasicTextField(
+                        value = findQuery,
+                        onValueChange = {
+                            findQuery = it
+                            internalWebView?.findAllAsync(it)
+                        },
+                        singleLine = true,
+                        textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+                        cursorBrush = SolidColor(Color(0xFF22D3EE)),
+                        modifier = Modifier.weight(1f),
+                        decorationBox = { inner ->
+                            if (findQuery.isEmpty()) Text("পৃষ্ঠার ভেতর খুঁজুন...", color = Color(0xFF9AA0A6), fontSize = 13.sp)
+                            inner()
+                        }
+                    )
+                    IconButton(onClick = { internalWebView?.findNext(false) }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Prev", tint = Color.White)
+                    }
+                    IconButton(onClick = { internalWebView?.findNext(true) }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Next", tint = Color.White)
+                    }
+                    IconButton(onClick = {
+                        showFindBar = false
+                        findQuery = ""
+                        internalWebView?.clearMatches()
+                    }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF9AA0A6))
+                    }
+                }
+            }
+
             AnimatedVisibility(visible = isLoading && !isHomeVisible) {
                 LinearProgressIndicator(
                     modifier = Modifier.fillMaxWidth().height(2.dp),
@@ -673,9 +912,9 @@ fun OmarVioBrowserApp(
                 )
             }
 
-            // Main Content Area: Native Chromium WebView + Synced Cloudflare Home Shell (with Offline Fallback)
+            // Main Content Area: Native Chromium WebView + Synced Cloudflare Home UI (with Offline Fallback)
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                // 1. Dedicated Native Chromium WebView for real external websites
+                // 1. Native Chromium WebView for ALL websites
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
@@ -727,11 +966,13 @@ fun OmarVioBrowserApp(
                             }
 
                             webChromeClient = OmarVioWebChromeClient(
-                                onProgressChanged = { progress ->
-                                    isLoading = progress < 100
-                                },
+                                onProgressChanged = { progress -> isLoading = progress < 100 },
                                 onTitleReceived = { title ->
-                                    if (title.isNotEmpty()) pageTitle = title
+                                    if (title.isNotEmpty()) {
+                                        pageTitle = title
+                                        val idx = activeTabIndex.coerceIn(0, tabs.lastIndex)
+                                        tabs[idx] = tabs[idx].copy(title = title)
+                                    }
                                 },
                                 onShowFilePicker = { fileCallback, params ->
                                     pendingFileCallback?.onReceiveValue(null)
@@ -763,7 +1004,12 @@ fun OmarVioBrowserApp(
                                 onPageTitleChanged = { title -> pageTitle = title },
                                 onUrlChanged = { url ->
                                     currentUrl = url
-                                    if (!isHomeVisible) inputUrl = url
+                                    if (!isHomeVisible) {
+                                        inputUrl = url
+                                        val idx = activeTabIndex.coerceIn(0, tabs.lastIndex)
+                                        tabs[idx] = tabs[idx].copy(url = url)
+                                        addHistoryEntry(pageTitle, url)
+                                    }
                                     canGoBack = WebBackNavigationManager.canNavigateBack(browserWebView)
                                     canGoForward = WebBackNavigationManager.canNavigateForward(browserWebView)
                                 },
@@ -791,7 +1037,7 @@ fun OmarVioBrowserApp(
                     }
                 )
 
-                // 2. Synced Web Home UI Container (stays live-synced with Cloudflare Pages; shows offline fallback if offline on cold start)
+                // 2. Synced Cloudflare Web Home Shell (exact 1:1 Website UI, Menus, Search Engine Modal, Settings)
                 if (isHomeVisible) {
                     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF060913))) {
                         if (!homeWebFailed) {
@@ -818,13 +1064,28 @@ fun OmarVioBrowserApp(
                                         }
 
                                         addJavascriptInterface(
-                                            OmarvioJsBridge(installedVersion) { targetUrl ->
-                                                post { navigateToUrl(targetUrl) }
-                                            },
+                                            OmarvioJsBridge(
+                                                appVersion = installedVersion,
+                                                onOpenExternalUrl = { targetUrl, incog ->
+                                                    post { navigateToUrl(targetUrl, incog) }
+                                                },
+                                                onSetEngine = { engId ->
+                                                    post {
+                                                        selectedEngineId = engId
+                                                        prefs.edit().putString("selected_engine", engId).apply()
+                                                    }
+                                                },
+                                                onSetDesktop = { enabled ->
+                                                    post { toggleDesktopMode(enabled) }
+                                                },
+                                                onClearData = {
+                                                    post { clearAllBrowserData() }
+                                                }
+                                            ),
                                             "OmarvioAndroid"
                                         )
 
-                                        webViewClient = object : WebViewClient() {
+                                        webViewClient = object : android.webkit.WebViewClient() {
                                             override fun shouldOverrideUrlLoading(
                                                 view: WebView?,
                                                 request: WebResourceRequest?
@@ -849,229 +1110,115 @@ fun OmarVioBrowserApp(
                                         }
 
                                         homeWebView = this
-                                        loadUrl(CLOUDFLARE_HOME_URL)
+                                        loadUrl(homeTargetUrl)
                                     }
                                 },
                                 update = { wv ->
                                     homeWebView = wv
+                                    if (wv.url != null && wv.url != homeTargetUrl && homeTargetUrl.contains("openSettings")) {
+                                        wv.loadUrl(homeTargetUrl)
+                                    }
                                 }
                             )
                         }
 
-                        // Native Compose Home Fallback (only visible if offline before first Cloudflare cache)
+                        // Offline Native Fallback (only if offline on first launch before Cloudflare cache exists)
                         if (homeWebFailed) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .background(
-                                        Brush.verticalGradient(
-                                            listOf(Color(0xFF0A0F1F), Color(0xFF070B16), Color(0xFF050811))
-                                        )
-                                    )
+                                    .background(Brush.verticalGradient(listOf(Color(0xFF0A0F1F), Color(0xFF070B16), Color(0xFF050811))))
                                     .verticalScroll(rememberScrollState())
-                                    .padding(horizontal = 20.dp, vertical = 28.dp),
+                                    .padding(horizontal = 20.dp, vertical = 24.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Spacer(modifier = Modifier.height(8.dp))
-
                                 Image(
                                     painter = painterResource(id = R.drawable.omarvio_logo),
                                     contentDescription = "OMARVIO BROWSER Logo",
                                     contentScale = ContentScale.Fit,
-                                    modifier = Modifier
-                                        .size(82.dp)
-                                        .clip(RoundedCornerShape(18.dp))
-                                        .background(Color.Black)
+                                    modifier = Modifier.size(76.dp).clip(RoundedCornerShape(18.dp)).background(Color.Black)
                                 )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text("OMARVIO BROWSER", fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFF38BDF8))
+                                Text("\"আমার ফোন, আমার ডেটা – কাউকে দেব না!\"", fontSize = 12.sp, color = Color(0xFF94A3B8))
+                                Spacer(modifier = Modifier.height(18.dp))
 
-                                Spacer(modifier = Modifier.height(14.dp))
-
-                                Text(
-                                    text = "OMARVIO BROWSER",
-                                    fontSize = 24.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFF38BDF8),
-                                    letterSpacing = 0.6.sp,
-                                    textAlign = TextAlign.Center
-                                )
-
-                                Spacer(modifier = Modifier.height(4.dp))
-
-                                Text(
-                                    text = "\"আমার ফোন, আমার ডেটা – কাউকে দেব না!\"",
-                                    fontSize = 12.sp,
-                                    color = Color(0xFF94A3B8),
-                                    textAlign = TextAlign.Center
-                                )
-
-                                Spacer(modifier = Modifier.height(22.dp))
-
+                                // White Pill Search Box with Engine Dropdown
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .height(52.dp)
                                         .clip(RoundedCornerShape(26.dp))
                                         .background(Color.White)
-                                        .padding(start = 16.dp, end = 6.dp),
+                                        .padding(horizontal = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(
-                                        Icons.Default.Search,
-                                        contentDescription = "Search",
-                                        tint = Color(0xFF475569),
-                                        modifier = Modifier.size(20.dp)
+                                    Text(
+                                        text = "${activeEngine.label} ▾",
+                                        color = Color(0xFF0284C7),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .background(Color(0xFFE0F2FE))
+                                            .clickable { showEngineModal = true }
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
                                     )
-                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     BasicTextField(
                                         value = homeSearchText,
                                         onValueChange = { homeSearchText = it },
                                         singleLine = true,
-                                        textStyle = TextStyle(
-                                            color = Color(0xFF0F172A),
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.Medium
-                                        ),
+                                        textStyle = TextStyle(color = Color(0xFF0F172A), fontSize = 14.sp),
                                         cursorBrush = SolidColor(Color(0xFF0284C7)),
                                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                                         keyboardActions = KeyboardActions(onSearch = { navigateToUrl(homeSearchText) }),
                                         modifier = Modifier.weight(1f),
-                                        decorationBox = { innerTextField ->
-                                            if (homeSearchText.isEmpty()) {
-                                                Text(
-                                                    text = "সার্চ বা ওয়েব ঠিকানা লিখুন...",
-                                                    color = Color(0xFF94A3B8),
-                                                    fontSize = 14.sp,
-                                                    maxLines = 1
-                                                )
-                                            }
-                                            innerTextField()
+                                        decorationBox = { inner ->
+                                            if (homeSearchText.isEmpty()) Text("সার্চ বা ওয়েব ঠিকানা লিখুন...", color = Color(0xFF94A3B8), fontSize = 13.sp)
+                                            inner()
                                         }
                                     )
-                                    if (homeSearchText.isNotEmpty()) {
-                                        IconButton(
-                                            onClick = { homeSearchText = "" },
-                                            modifier = Modifier.size(34.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Default.Close,
-                                                contentDescription = "Clear",
-                                                tint = Color(0xFF64748B),
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        }
-                                    }
                                     Box(
-                                        modifier = Modifier
-                                            .size(40.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(0xFF0284C7))
-                                            .clickable { navigateToUrl(homeSearchText) },
+                                        modifier = Modifier.size(38.dp).clip(CircleShape).background(Color(0xFF2563EB)).clickable { navigateToUrl(homeSearchText) },
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        Icon(
-                                            Icons.AutoMirrored.Filled.ArrowForward,
-                                            contentDescription = "Go",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(19.dp)
-                                        )
+                                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Go", tint = Color.White, modifier = Modifier.size(18.dp))
                                     }
                                 }
 
-                                Spacer(modifier = Modifier.height(14.dp))
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    engines.forEach { eng ->
-                                        val active = eng.id == selectedEngineId
-                                        Text(
-                                            text = eng.label,
-                                            fontSize = 12.sp,
-                                            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                                            color = if (active) Color(0xFF040817) else Color(0xFFCBD5E1),
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(10.dp))
-                                                .background(if (active) Color(0xFF22D3EE) else Color(0xFF131B2E))
-                                                .clickable { selectedEngineId = eng.id }
-                                                .padding(horizontal = 13.dp, vertical = 8.dp)
-                                        )
-                                    }
-                                }
-
-                                Spacer(modifier = Modifier.height(26.dp))
-
-                                Text(
-                                    text = "জনপ্রিয় ওয়েবসাইট",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFF94A3B8),
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                Spacer(modifier = Modifier.height(14.dp))
-
+                                Spacer(modifier = Modifier.height(22.dp))
                                 for (rowIndex in 0..1) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp),
-                                        horizontalArrangement = Arrangement.SpaceEvenly
-                                    ) {
+                                    Row(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                                         for (colIndex in 0..3) {
                                             val item = shortcuts[rowIndex * 4 + colIndex]
-                                            Column(
-                                                horizontalAlignment = Alignment.CenterHorizontally,
-                                                modifier = Modifier
-                                                    .width(72.dp)
-                                                    .clickable { navigateToUrl(item.url) }
-                                            ) {
+                                            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(72.dp).clickable { navigateToUrl(item.url) }) {
                                                 Box(
-                                                    modifier = Modifier
-                                                        .size(52.dp)
-                                                        .clip(CircleShape)
-                                                        .background(Color(0xFF151E32))
-                                                        .border(1.dp, Color(0xFF26324B), CircleShape),
+                                                    modifier = Modifier.size(50.dp).clip(CircleShape).background(Color(0xFF151E32)).border(1.dp, Color(0xFF26324B), CircleShape),
                                                     contentAlignment = Alignment.Center
                                                 ) {
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .size(38.dp)
-                                                            .clip(CircleShape)
-                                                            .background(item.bgColor),
-                                                        contentAlignment = Alignment.Center
-                                                    ) {
-                                                        Text(
-                                                            text = item.badge,
-                                                            color = item.textColor,
-                                                            fontWeight = FontWeight.Black,
-                                                            fontSize = 15.sp
-                                                        )
+                                                    Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(item.bgColor), contentAlignment = Alignment.Center) {
+                                                        Text(item.badge, color = item.textColor, fontWeight = FontWeight.Black, fontSize = 14.sp)
                                                     }
                                                 }
                                                 Spacer(modifier = Modifier.height(6.dp))
-                                                Text(
-                                                    text = item.name,
-                                                    fontSize = 11.sp,
-                                                    color = Color(0xFFE2E8F0),
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                    textAlign = TextAlign.Center
-                                                )
+                                                Text(item.name, fontSize = 11.sp, color = Color(0xFFE2E8F0), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             }
                                         }
                                     }
                                 }
 
-                                Spacer(modifier = Modifier.height(8.dp))
-
                                 Text(
-                                    text = "ক্লাউড UI সিঙ্ক রিফ্রেশ করুন",
+                                    text = "ওয়েবসাইট UI পুনরায় সিঙ্ক করুন",
+                                    color = Color(0xFF38BDF8),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFF38BDF8),
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(10.dp))
                                         .background(Color(0xFF131B2E))
                                         .clickable {
                                             homeWebFailed = false
+                                            homeTargetUrl = CLOUDFLARE_HOME_URL
                                             homeWebView?.loadUrl(CLOUDFLARE_HOME_URL)
                                         }
                                         .padding(horizontal = 14.dp, vertical = 8.dp)
@@ -1082,87 +1229,408 @@ fun OmarVioBrowserApp(
                 }
             }
 
-            // Bottom Navigation Toolbar with navigationBarsPadding so system keys never cover buttons
-            Surface(color = Color(0xFF0B1329), modifier = Modifier.fillMaxWidth()) {
-                Row(
+            // Bottom Navigation Toolbar during active website browsing (plus clean nav bar padding on Home)
+            if (!isHomeVisible) {
+                Surface(color = Color(0xFF0B1329), modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .height(50.dp)
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = {
+                                val wv = internalWebView
+                                if (wv != null && WebBackNavigationManager.navigateBack(wv)) {
+                                    canGoBack = WebBackNavigationManager.canNavigateBack(wv)
+                                    canGoForward = WebBackNavigationManager.canNavigateForward(wv)
+                                } else {
+                                    goToHome()
+                                }
+                            }
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                        }
+
+                        IconButton(
+                            onClick = {
+                                val wv = internalWebView
+                                if (wv != null && WebBackNavigationManager.navigateForward(wv)) {
+                                    canGoBack = WebBackNavigationManager.canNavigateBack(wv)
+                                    canGoForward = WebBackNavigationManager.canNavigateForward(wv)
+                                }
+                            },
+                            enabled = canGoForward
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowForward,
+                                contentDescription = "Forward",
+                                tint = if (canGoForward) Color.White else Color(0xFF475569)
+                            )
+                        }
+
+                        IconButton(onClick = { goToHome() }) {
+                            Icon(Icons.Default.Home, contentDescription = "Home", tint = Color(0xFF06B6D4))
+                        }
+
+                        IconButton(onClick = { internalWebView?.reload() }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Reload", tint = Color.White)
+                        }
+
+                        IconButton(onClick = {
+                            val shareTarget = if (currentUrl.isBlank()) "https://omarvio-browser.pages.dev" else currentUrl
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, shareTarget)
+                            }
+                            context.startActivity(Intent.createChooser(shareIntent, "Share URL"))
+                        }) {
+                            Icon(Icons.Default.Share, contentDescription = "Share", tint = Color.White)
+                        }
+                    }
+                }
+            } else {
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .background(Color(0xFF060913))
                         .navigationBarsPadding()
-                        .height(50.dp)
-                        .padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                )
+            }
+        }
+
+        // =========================================================================
+        // CHROME ANDROID 3-DOT OVERFLOW MENU SHEET (Matches Website Screenshot #6)
+        // =========================================================================
+        if (showChromeMenu) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .clickable { showChromeMenu = false },
+                contentAlignment = Alignment.TopEnd
+            ) {
+                Column(
+                    modifier = Modifier
+                        .statusBarsPadding()
+                        .padding(top = 8.dp, end = 10.dp)
+                        .width(290.dp)
+                        .heightIn(max = 600.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Color(0xFF28292C))
+                        .border(1.dp, Color(0xFF3C4043), RoundedCornerShape(18.dp))
+                        .clickable(enabled = false) {}
+                        .verticalScroll(rememberScrollState())
+                        .padding(vertical = 6.dp)
                 ) {
-                    IconButton(
-                        onClick = {
-                            if (isHomeVisible) return@IconButton
-                            val wv = internalWebView
-                            if (wv != null && WebBackNavigationManager.navigateBack(wv)) {
-                                canGoBack = WebBackNavigationManager.canNavigateBack(wv)
-                                canGoForward = WebBackNavigationManager.canNavigateForward(wv)
-                            } else {
-                                goToHome()
-                            }
-                        },
-                        enabled = !isHomeVisible
+                    // Quick Top Icon Bar (← → ★ ↓ ↻)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint = if (!isHomeVisible) Color.White else Color(0xFF475569)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = {
-                            val wv = internalWebView
-                            if (wv != null && WebBackNavigationManager.navigateForward(wv)) {
-                                isHomeVisible = false
-                                canGoBack = WebBackNavigationManager.canNavigateBack(wv)
-                                canGoForward = WebBackNavigationManager.canNavigateForward(wv)
-                            }
-                        },
-                        enabled = canGoForward
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowForward,
-                            contentDescription = "Forward",
-                            tint = if (canGoForward) Color.White else Color(0xFF475569)
-                        )
-                    }
-
-                    IconButton(onClick = { goToHome() }) {
-                        Icon(Icons.Default.Home, contentDescription = "Home", tint = Color(0xFF06B6D4))
-                    }
-
-                    IconButton(onClick = {
-                        if (isHomeVisible) {
-                            homeWebFailed = false
-                            homeWebView?.loadUrl(CLOUDFLARE_HOME_URL)
-                        } else {
+                        IconButton(onClick = {
+                            showChromeMenu = false
+                            if (canGoBack) internalWebView?.goBack() else goToHome()
+                        }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color(0xFFE3E3E3))
+                        }
+                        IconButton(onClick = {
+                            showChromeMenu = false
+                            internalWebView?.goForward()
+                        }, enabled = canGoForward) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowForward,
+                                contentDescription = "Forward",
+                                tint = if (canGoForward) Color(0xFFE3E3E3) else Color(0xFF5F6368)
+                            )
+                        }
+                        IconButton(onClick = {
+                            toggleBookmarkCurrent()
+                            showChromeMenu = false
+                        }) {
+                            Icon(
+                                if (isCurrentBookmarked) Icons.Default.Star else Icons.Default.StarBorder,
+                                contentDescription = "Bookmark",
+                                tint = if (isCurrentBookmarked) Color(0xFFFACC15) else Color(0xFFE3E3E3)
+                            )
+                        }
+                        IconButton(onClick = {
+                            showChromeMenu = false
+                            try {
+                                context.startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
+                            } catch (_: Exception) {}
+                        }) {
+                            Icon(Icons.Default.Download, contentDescription = "Downloads", tint = Color(0xFFE3E3E3))
+                        }
+                        IconButton(onClick = {
+                            showChromeMenu = false
                             internalWebView?.reload()
+                        }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Reload", tint = Color(0xFFE3E3E3))
                         }
-                    }) {
-                        Icon(
-                            Icons.Default.Refresh,
-                            contentDescription = "Reload",
-                            tint = Color.White
-                        )
                     }
 
-                    IconButton(onClick = {
-                        val shareTarget =
-                            if (isHomeVisible || currentUrl.isBlank()) "https://omarvio-browser.pages.dev" else currentUrl
-                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_TEXT, shareTarget)
-                        }
-                        context.startActivity(Intent.createChooser(shareIntent, "Share URL"))
-                    }) {
-                        Icon(Icons.Default.Share, contentDescription = "Share", tint = Color.White)
+                    HorizontalDivider(color = Color(0xFF3C4043))
+
+                    ChromeMenuRow(Icons.Default.Add, "New tab") {
+                        showChromeMenu = false
+                        createNewTab(incognito = false)
+                    }
+                    ChromeMenuRow(Icons.Default.VisibilityOff, "New Incognito tab") {
+                        showChromeMenu = false
+                        createNewTab(incognito = true)
+                    }
+
+                    HorizontalDivider(color = Color(0xFF3C4043))
+
+                    ChromeMenuRow(Icons.Default.History, "History") {
+                        showChromeMenu = false
+                        showHistoryModal = true
+                    }
+                    ChromeMenuRow(Icons.Default.Delete, "Delete browsing data") {
+                        showChromeMenu = false
+                        clearAllBrowserData()
+                    }
+                    ChromeMenuRow(Icons.Default.Download, "Downloads") {
+                        showChromeMenu = false
+                        try {
+                            context.startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
+                        } catch (_: Exception) {}
+                    }
+                    ChromeMenuRow(Icons.Default.Bookmark, "Bookmarks") {
+                        showChromeMenu = false
+                        showBookmarksModal = true
+                    }
+                    ChromeMenuRow(Icons.Default.Layers, "Tabs (${tabs.size})") {
+                        showChromeMenu = false
+                        showTabsModal = true
+                    }
+
+                    HorizontalDivider(color = Color(0xFF3C4043))
+
+                    ChromeMenuRow(Icons.Default.Search, "Search engine (${activeEngine.label})") {
+                        showChromeMenu = false
+                        showEngineModal = true
+                    }
+                    ChromeMenuRow(Icons.Default.FindInPage, "Find in page") {
+                        showChromeMenu = false
+                        showFindBar = true
+                    }
+                    ChromeMenuRow(
+                        icon = Icons.Default.Laptop,
+                        label = if (isDesktopMode) "Desktop site  ✓" else "Desktop site"
+                    ) {
+                        showChromeMenu = false
+                        toggleDesktopMode()
+                    }
+                    ChromeMenuRow(Icons.Default.Shield, "AdBlock ($blockedCount ব্লকড)") {
+                        showChromeMenu = false
+                        Toast.makeText(context, "🛡️ $blockedCount টি বিজ্ঞাপন ও ট্র্যাকার ব্লক করা হয়েছে", Toast.LENGTH_SHORT).show()
+                    }
+
+                    HorizontalDivider(color = Color(0xFF3C4043))
+
+                    ChromeMenuRow(Icons.Default.Settings, "Settings & Customize") {
+                        showChromeMenu = false
+                        goToHome(CLOUDFLARE_SETTINGS_URL)
                     }
                 }
             }
+        }
+
+        // =========================================================================
+        // SEARCH ENGINE SELECTOR MODAL (Matches Website Screenshot #1)
+        // =========================================================================
+        if (showEngineModal) {
+            Dialog(onDismissRequest = { showEngineModal = false }) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color(0xFF202124))
+                        .border(1.dp, Color(0xFF3C4043), RoundedCornerShape(24.dp))
+                        .padding(16.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { showEngineModal = false }, modifier = Modifier.size(34.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Column {
+                            Text("Search engine", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                            Text("ডিফল্ট সার্চ ইঞ্জিন ও প্রাইভেসির উৎস বেছে নিন", color = Color(0xFF9AA0A6), fontSize = 11.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    LazyColumn(modifier = Modifier.heightIn(max = 380.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(engines) { eng ->
+                            val selected = eng.id == selectedEngineId
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(if (selected) Color(0xFF1E3A5F) else Color(0xFF292A2D))
+                                    .border(
+                                        1.dp,
+                                        if (selected) Color(0xFF38BDF8) else Color(0xFF3C4043),
+                                        RoundedCornerShape(16.dp)
+                                    )
+                                    .clickable { selectSearchEngine(eng.id) }
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                    Box(
+                                        modifier = Modifier.size(36.dp).clip(CircleShape).background(eng.badgeColor),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(eng.label.take(1), color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
+                                    }
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column {
+                                        Text("${eng.label} · ${eng.badge}", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                        Text(eng.subtitle, color = Color(0xFF9AA0A6), fontSize = 11.sp)
+                                    }
+                                }
+                                Icon(
+                                    imageVector = if (selected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                                    contentDescription = null,
+                                    tint = if (selected) Color(0xFF38BDF8) else Color(0xFF5F6368)
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        Button(
+                            onClick = { showEngineModal = false },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3C4043))
+                        ) {
+                            Text("ঠিক আছে", color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // TAB SWITCHER MODAL
+        // =========================================================================
+        if (showTabsModal) {
+            Dialog(onDismissRequest = { showTabsModal = false }) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(Color(0xFF18191C))
+                        .border(1.dp, Color(0xFF3C4043), RoundedCornerShape(22.dp))
+                        .padding(16.dp)
+                ) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("ওপেন ট্যাব (${tabs.size})", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "+ New",
+                                color = Color(0xFF04101E),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF38BDF8))
+                                    .clickable { showTabsModal = false; createNewTab(false) }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                            Text(
+                                "🕵️ Incognito",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF581C87))
+                                    .clickable { showTabsModal = false; createNewTab(true) }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    LazyColumn(modifier = Modifier.heightIn(max = 340.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(tabs.size) { idx ->
+                            val tab = tabs[idx]
+                            val isActive = idx == activeTabIndex
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isActive) Color(0xFF1E3A5F) else Color(0xFF28292C))
+                                    .clickable { showTabsModal = false; switchToTab(idx) }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Text(
+                                        text = (if (tab.isIncognito) "🕵️ " else "") + tab.title,
+                                        color = Color.White,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (tab.url.isNotBlank()) {
+                                        Text(tab.url, color = Color(0xFF9AA0A6), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                                IconButton(onClick = { closeTabAt(idx) }, modifier = Modifier.size(30.dp)) {
+                                    Icon(Icons.Default.Close, contentDescription = "Close Tab", tint = Color(0xFF9AA0A6), modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // BOOKMARKS MODAL
+        // =========================================================================
+        if (showBookmarksModal) {
+            SavedListDialog(
+                title = "বুকমার্কস (${bookmarks.size})",
+                entries = bookmarks,
+                emptyText = "এখনো কোনো বুকমার্ক সেভ করা হয়নি",
+                onDismiss = { showBookmarksModal = false },
+                onSelect = { showBookmarksModal = false; navigateToUrl(it.url) },
+                onClearAll = null
+            )
+        }
+
+        // =========================================================================
+        // HISTORY MODAL
+        // =========================================================================
+        if (showHistoryModal) {
+            SavedListDialog(
+                title = "ব্রাউজিং হিস্ট্রি (${historyList.size})",
+                entries = historyList,
+                emptyText = "হিস্ট্রি সম্পূর্ণ খালি",
+                onDismiss = { showHistoryModal = false },
+                onSelect = { showHistoryModal = false; navigateToUrl(it.url) },
+                onClearAll = {
+                    historyList.clear()
+                    persistHistory()
+                    showHistoryModal = false
+                }
+            )
         }
 
         // Fullscreen Video Container Overlay
@@ -1181,6 +1649,83 @@ fun OmarVioBrowserApp(
                     }
                 }
             )
+        }
+    }
+}
+
+@Composable
+private fun ChromeMenuRow(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = Color(0xFFC4C7C5), modifier = Modifier.size(20.dp))
+        Spacer(modifier = Modifier.width(16.dp))
+        Text(label, color = Color(0xFFE3E3E3), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun SavedListDialog(
+    title: String,
+    entries: List<SavedEntry>,
+    emptyText: String,
+    onDismiss: () -> Unit,
+    onSelect: (SavedEntry) -> Unit,
+    onClearAll: (() -> Unit)?
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(22.dp))
+                .background(Color(0xFF18191C))
+                .border(1.dp, Color(0xFF3C4043), RoundedCornerShape(22.dp))
+                .padding(16.dp)
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                if (onClearAll != null && entries.isNotEmpty()) {
+                    Text(
+                        "মুছে ফেলুন",
+                        color = Color(0xFFFB7185),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clickable(onClick = onClearAll).padding(4.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            if (entries.isEmpty()) {
+                Text(emptyText, color = Color(0xFF9AA0A6), fontSize = 13.sp, modifier = Modifier.padding(vertical = 20.dp))
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 340.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(entries) { entry ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF28292C))
+                                .clickable { onSelect(entry) }
+                                .padding(horizontal = 12.dp, vertical = 10.dp)
+                        ) {
+                            Text(entry.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(entry.url, color = Color(0xFF9AA0A6), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onDismiss) { Text("বন্ধ করুন", color = Color(0xFF38BDF8)) }
+            }
         }
     }
 }

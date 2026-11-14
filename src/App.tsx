@@ -44,7 +44,12 @@ import { SplashScreen } from './components/SplashScreen';
 import { registerServiceWorker } from './engine/swRegister';
 import { computeAliveTabIds, getMaxAliveTabs } from './engine/tabManager';
 import { markTabSwitchStart, measureTabSwitchEnd } from './engine/metrics';
-import { isAndroidNativeShell, openUrlInNativeAndroid } from './engine/nativeBridge';
+import {
+  isAndroidNativeShell,
+  openUrlInNativeAndroid,
+  syncDesktopModeWithAndroid,
+  clearNativeAndroidBrowsingData,
+} from './engine/nativeBridge';
 
 // Module M7: Code-split heavy modals with React.lazy
 const SettingsDrawer = React.lazy(() => import('./components/SettingsDrawer').then(m => ({ default: m.SettingsDrawer })));
@@ -128,7 +133,12 @@ export default function App() {
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [isTabSwitcherOpen, setIsTabSwitcherOpen] = useState(false);
   const [isPanicModalOpen, setIsPanicModalOpen] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return new URLSearchParams(window.location.search).get('openSettings') === '1';
+    }
+    return false;
+  });
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>('general');
 
   const openSettings = (tab: SettingsTabId = 'general') => {
@@ -328,6 +338,7 @@ export default function App() {
     setTabs((prev) =>
       prev.map((t) => (t.id === activeTabId ? { ...t, isDesktopMode: nextState } : t))
     );
+    syncDesktopModeWithAndroid(nextState);
     triggerToast(
       nextState
         ? '🖥️ Desktop site enabled (1024px viewport scaling)'
@@ -359,7 +370,8 @@ export default function App() {
     if (options.history) {
       clearAllBrowsingHistory();
     }
-    if (options.cache) {
+    if (options.cache || options.cookies) {
+      clearNativeAndroidBrowsingData();
       try {
         sessionStorage.clear();
         if (typeof caches !== 'undefined') {
@@ -447,8 +459,10 @@ export default function App() {
   // Direct Execution Navigation
   const executeNavigate = (targetUrl: string) => {
     if (targetUrl) {
-      addBrowsingHistory(targetUrl);
-      if (isAndroidShell && openUrlInNativeAndroid(targetUrl)) {
+      if (!activeTab.isIncognito) {
+        addBrowsingHistory(targetUrl);
+      }
+      if (isAndroidShell && openUrlInNativeAndroid(targetUrl, !!activeTab.isIncognito)) {
         return;
       }
     }
@@ -694,26 +708,14 @@ export default function App() {
         }`}
       >
         {!activeTab.url ? (
-          /* HOME SCREEN HEADER: Brave-style Clean Minimalist Bar (Single unified search bar on Home) */
+          /* HOME SCREEN HEADER: Unified single bar matching Website + Chrome Android */
           <div className="w-full flex items-center justify-between gap-2 py-0.5">
-            {/* Logo & Brand Name (avoid duplicating Android native top bar when inside Android Shell) */}
-            {isAndroidShell ? (
-              <button
-                type="button"
-                onClick={() => openSettings('general')}
-                className="min-h-[40px] px-2.5 rounded-lg text-xs font-medium text-cyan-300 hover:bg-white/5 flex items-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <Settings className="w-4 h-4" />
-                <span>কুইক সেটিংস ও থিম</span>
-              </button>
-            ) : (
-              <div
-                className="shrink-0 flex items-center gap-2"
-                title="OMARVIO Home"
-              >
-                <HeaderBranding compact={true} />
-              </div>
-            )}
+            <div
+              className="shrink-0 flex items-center gap-2"
+              title="OMARVIO Home"
+            >
+              <HeaderBranding compact={true} />
+            </div>
 
             {/* Right Action Icons matching Brave / Chrome Android */}
             <div className="flex items-center gap-1.5 shrink-0">

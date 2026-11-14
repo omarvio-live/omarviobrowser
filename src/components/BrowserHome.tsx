@@ -30,7 +30,7 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { getSanitizedSearchUrl } from '../engine/adblocker';
-import { isAndroidNativeShell } from '../engine/nativeBridge';
+import { isAndroidNativeShell, syncSearchEngineWithAndroid } from '../engine/nativeBridge';
 import {
   SearchEngineSelectorModal,
   SEARCH_ENGINES,
@@ -256,6 +256,7 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
 
   const handleSelectEngine = (engineId: string) => {
     setCurrentEngineId(engineId);
+    syncSearchEngineWithAndroid(engineId);
     if (typeof window !== 'undefined') {
       localStorage.setItem('omarvio_search_engine', engineId);
     }
