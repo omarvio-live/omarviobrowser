@@ -38,7 +38,7 @@ jobs:
             IS_TAG="true"
             VERSION_NAME="${TAG_NAME#v}"
           else
-            TAG_NAME="latest-apk"
+            TAG_NAME="v2.0.0-build.${{ github.run_number }}"
             IS_TAG="false"
             VERSION_NAME="2.0.0.${{ github.run_number }}"
           fi
@@ -53,13 +53,26 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK 35 & Build Tools
+      - name: Configure Android SDK 35 & Build Tools
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK_DIR" ]; then
+            echo "Android SDK directory not found at $SDK_DIR"
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
+          SDKMANAGER=$(find "$SDK_DIR/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -n 1)
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER=$(command -v sdkmanager || true)
+          fi
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found inside $SDK_DIR"
+            exit 1
+          fi
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_DIR" --licenses > /dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK_DIR" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
