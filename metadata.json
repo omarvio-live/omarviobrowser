@@ -1,0 +1,6 @@
+{
+  "name": "OMARVIO BROWSER",
+  "description": "My Phone, My Data – Why Surrender It To Others! Privacy-first hybrid PWA browser with zero server load by OMARVIO GLOBAL LTD.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "omarvio-browser",
+  "compatibility_date": "2025-02-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "pages_build_output_dir": "dist",
+
+  // ---------------------------------------------------------------------------
+  // CLOUDFLARE PAGES EDGE RUNTIME & KV NAMESPACE BINDING
+  // ---------------------------------------------------------------------------
+  "kv_namespaces": [
+    {
+      "binding": "KV_BINDING",
+      "id": "5420d1a3d14a4590ab571565c0337167",
+      "preview_id": "5c100dd91d144dca82dd616e1a58613f"
+    },
+    {
+      "binding": "OMARVIO_KV",
+      "id": "5420d1a3d14a4590ab571565c0337167",
+      "preview_id": "5c100dd91d144dca82dd616e1a58613f"
+    },
+    {
+      "binding": "KV",
+      "id": "5420d1a3d14a4590ab571565c0337167",
+      "preview_id": "5c100dd91d144dca82dd616e1a58613f"
+    }
+  ],
+
+  // Global Environment Variables & Edge Parameters
+  "vars": {
+    "APP_NAME": "OMARVIO BROWSER",
+    "APP_VERSION": "v2.0.0",
+    "SLOGAN": "My Phone, My Data – Why Surrender It To Others!",
+    "DEFAULT_SEARCH_ENGINE": "google",
+    "ENCRYPTION_STANDARD": "AES-GCM-256-PBKDF2-100K",
+    "MILITARY_GRADE_KEY_AES256_GCM": "7f9a2e4b8c1d5e6a0f3b4c5d6e7f8a9b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f",
+    "OMARVIO_VAULT_SIGNATURE": "OMARVIO-GLOBAL-LTD-AES-256-GCM-CERTIFIED",
+    "CLOUDFLARE_EDGE_SYNC": "enabled",
+    "NODE_ENV": "production",
+    "ALLOW_FRAME_BYPASS": "true"
+  }
+}

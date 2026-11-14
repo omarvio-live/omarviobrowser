@@ -1,0 +1,77 @@
+{
+  "id": "/",
+  "short_name": "OMARVIO BROWSER",
+  "name": "OMARVIO BROWSER",
+  "description": "My Phone, My Data – Why Surrender It To Others! Privacy-first hybrid PWA browser by OMARVIO GLOBAL LTD.",
+  "icons": [
+    {
+      "src": "/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png",
+      "type": "image/png",
+      "sizes": "1254x1254",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any"
+    }
+  ],
+  "start_url": "/",
+  "scope": "/",
+  "background_color": "#060913",
+  "theme_color": "#0b1329",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "any",
+  "categories": ["utilities", "productivity", "privacy"],
+  "share_target": {
+    "action": "/",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  },
+  "protocol_handlers": [
+    {
+      "protocol": "web+omarvio",
+      "url": "/?url=%s"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "ডিফল্ট ব্রাউজার ওপেনার",
+      "short_name": "লিংক ওপেন",
+      "description": "WhatsApp ও Messenger লিংক আনর‍্যাপ করে সরাসরি ওপেন করুন",
+      "url": "/?mode=intent_picker",
+      "icons": [
+        {
+          "src": "/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "ইনকগনিটো মোড",
+      "short_name": "Incognito",
+      "description": "জিরো-হিস্ট্রি নিরাপদ প্রাইভেট ব্রাউজিং",
+      "url": "/?mode=incognito",
+      "icons": [
+        {
+          "src": "/assets/aistudio/file_0000000038508211a96b8fbe27d5ca68_9009abdf.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
+  ]
+}

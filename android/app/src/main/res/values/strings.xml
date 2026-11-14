@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">OMARVIO BROWSER</string>
+    <string name="search_hint">ওমারভিও-তে অনুসন্ধান বা URL লিখুন...</string>
+    <string name="privacy_shield">প্রাইভেসি শিল্ড সক্রিয়</string>
+    <string name="ad_block_status">বিজ্ঞাপন ও ট্র্যাকার ব্লকড</string>
+</resources>

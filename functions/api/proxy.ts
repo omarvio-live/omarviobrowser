@@ -1,0 +1,460 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ * 
+ * OMARVIO BROWSER - Cloudflare Pages Edge Proxy Function (/api/proxy)
+ * Runs directly on Cloudflare Edge Workers network with zero cold start.
+ * Strips X-Frame-Options, CSP, and CORS, and injects OmarVio in-tab navigation bridge.
+ */
+
+interface Env {
+  OMARVIO_KV?: any;
+  OMARVIO_DB?: any;
+  OMARVIO_BUCKET?: any;
+  AI?: any;
+  APP_NAME?: string;
+}
+
+export const onRequest: PagesFunction<Env> = async (context) => {
+  const { request } = context;
+  const urlObj = new URL(request.url);
+  let targetUrl = urlObj.searchParams.get('url');
+
+  if (!targetUrl && request.method === 'POST') {
+    try {
+      const body = await request.json() as any;
+      targetUrl = body?.url;
+    } catch {}
+  }
+
+  if (!targetUrl) {
+    return new Response('Missing url query parameter', { status: 400 });
+  }
+
+  // Unwrap any recursive nested proxy query
+  if (targetUrl.includes('/api/proxy?url=')) {
+    try {
+      const u = new URL(targetUrl, 'http://localhost');
+      const unwrapped = u.searchParams.get('url');
+      if (unwrapped) targetUrl = unwrapped;
+    } catch {}
+  }
+
+  // Auto-normalize scheme
+  if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+    targetUrl = `https://${targetUrl}`;
+  }
+
+  // Optimize platforms to lightweight mobile web variants and unwrap redirects
+  try {
+    const u = new URL(targetUrl);
+    const host = u.hostname.toLowerCase();
+
+    // DuckDuckGo: route to pure HTML version (guarantees 100% iframe/WebView compatibility without Webpack errors)
+    if (host === 'duckduckgo.com' || host === 'www.duckduckgo.com') {
+      u.hostname = 'html.duckduckgo.com';
+      if (!u.pathname || u.pathname === '/') {
+        if (u.searchParams.has('q')) {
+          u.pathname = '/html/';
+        }
+      }
+      targetUrl = u.toString();
+    } else if (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.m.youtube.com') {
+      u.hostname = 'm.youtube.com';
+      targetUrl = u.toString();
+    } else if (host === 'facebook.com' || host === 'www.facebook.com' || host === 'm.m.facebook.com' || host === 'www.m.facebook.com') {
+      u.hostname = 'm.facebook.com';
+      targetUrl = u.toString();
+    } else if (host === 'wikipedia.org' || host === 'www.wikipedia.org' || host === 'm.m.wikipedia.org') {
+      u.hostname = 'm.wikipedia.org';
+      targetUrl = u.toString();
+    }
+
+    // Auto-unwrap search redirects (Google /url?q=, DuckDuckGo /l/?uddg=, Facebook l.php?u=)
+    if (host.includes('google.') && u.pathname.startsWith('/url')) {
+      const realTarget = u.searchParams.get('q') || u.searchParams.get('url');
+      if (realTarget && (realTarget.startsWith('http://') || realTarget.startsWith('https://'))) {
+        targetUrl = realTarget;
+      }
+    } else if (host.includes('duckduckgo.com') && (u.searchParams.has('uddg') || u.pathname.startsWith('/l/'))) {
+      const uddg = u.searchParams.get('uddg');
+      if (uddg) {
+        try {
+          const decoded = decodeURIComponent(uddg);
+          if (decoded.startsWith('http://') || decoded.startsWith('https://')) {
+            targetUrl = decoded;
+          }
+        } catch {}
+      }
+    } else if (host.includes('facebook.com') && (u.pathname.includes('/flx/warn/') || u.pathname.includes('/l.php'))) {
+      const uParam = u.searchParams.get('u');
+      if (uParam) {
+        try {
+          const decoded = decodeURIComponent(uParam);
+          if (decoded.startsWith('http://') || decoded.startsWith('https://')) {
+            targetUrl = decoded;
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  try {
+    const response = await fetch(targetUrl, {
+      method: request.method === 'POST' ? 'POST' : 'GET',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
+        'Accept':
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
+        'Upgrade-Insecure-Requests': '1',
+      },
+      redirect: 'follow',
+    });
+
+    const finalUrl = response.url || targetUrl;
+    const contentType = response.headers.get('content-type') || 'text/html';
+
+    // Clone response headers and delete framing blockers
+    const newHeaders = new Headers(response.headers);
+    newHeaders.delete('X-Frame-Options');
+    newHeaders.delete('Content-Security-Policy');
+    newHeaders.delete('Content-Security-Policy-Report-Only');
+    newHeaders.delete('Cross-Origin-Opener-Policy');
+    newHeaders.delete('Cross-Origin-Embedder-Policy');
+    newHeaders.set('Access-Control-Allow-Origin', '*');
+    newHeaders.set('X-Omarvio-Edge', 'Cloudflare-Workers-2026');
+
+    if (contentType.includes('text/html') || contentType.includes('application/xhtml+xml')) {
+      let html = await response.text();
+
+      // Detect strict bot-protection / Cloudflare / WAF blocks (403/401/429/503) so user never hits a broken error
+      const isBotChallenge =
+        response.status === 403 ||
+        response.status === 401 ||
+        response.status === 429 ||
+        response.status === 503 ||
+        /just a moment\.\.\.|cf-browser-verification|attention required! \| cloudflare/i.test(html.slice(0, 4000));
+
+      if (isBotChallenge) {
+        return new Response(
+          `<!DOCTYPE html>
+          <html lang="bn">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>OMARVIO Smart Direct Open</title>
+            <style>
+              body { background: #070a14; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; text-align: center; }
+              .card { max-width: 460px; width: 100%; background: #0d1226; border: 1px solid rgba(6,182,212,0.35); border-radius: 24px; padding: 26px; box-shadow: 0 20px 40px rgba(0,0,0,0.65); }
+              .icon { width: 54px; height: 54px; background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); border-radius: 18px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 14px; font-size: 24px; }
+              h2 { margin: 0 0 8px; font-size: 18px; font-weight: 800; color: #f8fafc; }
+              p { font-size: 13px; color: #94a3b8; line-height: 1.55; margin: 0 0 18px; }
+              .url { background: #050814; border: 1px solid rgba(255,255,255,0.1); padding: 8px 12px; border-radius: 12px; font-family: monospace; font-size: 11px; color: #38bdf8; word-break: break-all; margin-bottom: 18px; text-align: left; }
+              .btn { display: block; width: 100%; box-sizing: border-box; background: linear-gradient(135deg, #10b981, #06b6d4); color: #020617; font-weight: 800; font-size: 13px; padding: 12px 18px; border-radius: 14px; text-decoration: none; margin-bottom: 10px; }
+              .btn-sec { background: #1e293b; color: #cbd5e1; border: 1px solid #334155; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div class="icon">🚀</div>
+              <h2>সরাসরি ওয়েবসাইট ওপেন করুন</h2>
+              <p>এই সাইটটি ক্লাউড সার্ভার প্রক্সির বদলে আপনার ফোনের আসল ক্রোমিয়াম ইঞ্জিন থেকে সরাসরি কানেকশন চায়। নিচের বাটনে ট্যাপ করলে কোনো বাধা ছাড়াই ১০০% খুলবে:</p>
+              <div class="url">${finalUrl}</div>
+              <a class="btn" href="${finalUrl}" target="_blank" rel="noopener noreferrer">সরাসরি ওপেন করুন (১০০% কাজ করবে)</a>
+              <a class="btn btn-sec" href="/api/download-apk" target="_blank" rel="noopener">অ্যান্ড্রয়েড নেটিভ APK ইনস্টল করুন (সব সাইট অটো চলে)</a>
+            </div>
+          </body>
+          </html>`,
+          {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            },
+          }
+        );
+      }
+
+      // 1. Remove restrictive meta tags and prevent automatic refresh/redirect traps
+      html = html.replace(
+        /<meta[^>]+http-equiv=["']?(content-security-policy|x-frame-options|refresh)["']?[^>]*>/gi,
+        ''
+      );
+
+      // 2. Inject <base href="...">
+      const baseTag = `<base href="${finalUrl}">`;
+      if (/<head[^>]*>/i.test(html)) {
+        html = html.replace(/<head[^>]*>/i, `$&${baseTag}`);
+      } else {
+        html = `${baseTag}${html}`;
+      }
+
+      // 3. Inject OmarVio navigation interceptor & anti-ad/anti-popup script
+      const interceptor = `
+        <style>
+          html {
+            -webkit-overflow-scrolling: touch !important;
+            touch-action: pan-x pan-y pinch-zoom !important;
+            overscroll-behavior-y: contain !important;
+          }
+          .ytp-ad-module, .ytp-ad-player-overlay, .ytp-ad-text, .video-ads, .ad-container, .ad-interrupting,
+          div[id*="google_ads"], div[class*="ad-box"], div[class*="sponsor"], iframe[src*="doubleclick"],
+          iframe[src*="adservice"], .fb-ad, .sponsored_ad, .ad-banner, .interstitial-ad, .overlay-ad,
+          div[class*="popup-banner"], div[id*="cookie-banner"], div[class*="consent-modal"] {
+            display: none !important;
+            visibility: hidden !important;
+            height: 0 !important;
+            width: 0 !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+          }
+        </style>
+        <script>
+          (function() {
+            var realParent = window.parent;
+            var speculativeUrl = null;
+
+            function enforceSelfNavigation() {
+              try {
+                var targets = document.querySelectorAll('a[target], form[target], area[target]');
+                for (var i = 0; i < targets.length; i++) {
+                  var t = targets[i].getAttribute('target');
+                  if (t && t !== '_self') {
+                    targets[i].setAttribute('target', '_self');
+                    targets[i].target = '_self';
+                  }
+                }
+              } catch(e) {}
+            }
+            enforceSelfNavigation();
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', enforceSelfNavigation);
+            }
+
+            try {
+              window.open = function(url) {
+                if (url && typeof url === 'string' && !url.startsWith('javascript:')) {
+                  try {
+                    var absoluteUrl = new URL(url, document.baseURI || window.location.href).href;
+                    if (realParent && realParent !== window) {
+                      realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: absoluteUrl }, '*');
+                    }
+                    window.location.href = '/api/proxy?url=' + encodeURIComponent(absoluteUrl);
+                  } catch(err) {
+                    if (realParent && realParent !== window) {
+                      realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: url }, '*');
+                    }
+                  }
+                }
+                return null;
+              };
+              window.alert = function() {};
+              window.confirm = function() { return true; };
+              // Anti-frame-busting: prevent child page from redirecting the top browser window
+              try {
+                Object.defineProperty(window, 'top', { get: function() { return window.self; } });
+              } catch(e) {}
+            } catch(e) {}
+
+            // Passive touch listener for pre-click speculative resolution
+            document.addEventListener('touchstart', function(e) {
+              try {
+                var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+                if (a) {
+                  var raw = a.getAttribute('href') || a.href || '';
+                  if (raw && !raw.startsWith('#') && !raw.startsWith('javascript:')) {
+                    a.target = '_self';
+                    a.setAttribute('target', '_self');
+                    speculativeUrl = new URL(raw, document.baseURI || window.location.href).href;
+                  }
+                }
+              } catch(err) {}
+            }, { passive: true, capture: true });
+
+            // Intercept link clicks and guarantee immediate in-app navigation without white screen
+            document.addEventListener('click', function(e) {
+              var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+              if (a) {
+                var rawHref = a.getAttribute('href') || a.href || '';
+                if (!rawHref || rawHref.startsWith('#') || rawHref.startsWith('javascript:')) return;
+                
+                a.setAttribute('target', '_self');
+                a.target = '_self';
+                e.preventDefault();
+                e.stopPropagation();
+
+                var target = speculativeUrl;
+                if (!target) {
+                  try {
+                    target = new URL(rawHref, document.baseURI || window.location.href).href;
+                  } catch(err) {
+                    target = a.href || rawHref;
+                  }
+                }
+                // Neutralize intent:// links that try to escape to Chrome
+                if (target.startsWith('intent:') || target.startsWith('market:')) {
+                  var fb = target.match(/browser_fallback_url=([^;&]+)/i);
+                  if (fb) {
+                    target = decodeURIComponent(fb[1]);
+                  } else {
+                    var sc = target.match(/scheme=([^;&]+)/i);
+                    if (sc) {
+                      target = sc[1] + '://' + target.replace(/^intent:\/\//, '').split('#')[0];
+                    } else {
+                      return;
+                    }
+                  }
+                }
+
+                // Intercept in-app downloads so they are saved directly in OmarVio's Downloads Hub
+                var cleanPath = target.split('?')[0].split('#')[0].toLowerCase();
+                var isDl = a.hasAttribute('download') || /\.(pdf|zip|rar|tar|gz|7z|apk|mp3|m4a|wav|aac|mp4|webm|mkv|mov|avi|docx?|xlsx?|pptx?|epub|txt|csv)$/i.test(cleanPath);
+                if (isDl) {
+                  var dlName = a.getAttribute('download') || cleanPath.split('/').pop() || 'downloaded_file';
+                  if (realParent && realParent !== window) {
+                    realParent.postMessage({ type: 'OMARVIO_DOWNLOAD', url: target, filename: dlName }, '*');
+                    return;
+                  }
+                }
+
+                try {
+                  if (realParent && realParent !== window) {
+                    realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: target }, '*');
+                  }
+                  window.location.href = '/api/proxy?url=' + encodeURIComponent(target);
+                } catch(err) {
+                  if (realParent && realParent !== window) {
+                    realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: a.href || rawHref }, '*');
+                  }
+                  window.location.href = '/api/proxy?url=' + encodeURIComponent(a.href || rawHref);
+                }
+              }
+            }, true);
+
+            // 5. Intercept form submissions
+            document.addEventListener('submit', function(e) {
+              var form = e.target;
+              if (form) {
+                form.setAttribute('target', '_self');
+                form.target = '_self';
+                var action = form.getAttribute('action') || '';
+                var method = (form.getAttribute('method') || 'GET').toUpperCase();
+                try {
+                  var formData = new FormData(form);
+                  var params = new URLSearchParams();
+                  formData.forEach(function(val, key) {
+                    if (typeof val === 'string') params.append(key, val);
+                  });
+                  var qTerm = params.get('q') || params.get('query') || params.get('p');
+                  if (qTerm) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    var searchDest = 'https://www.google.com/search?q=' + encodeURIComponent(qTerm);
+                    if (realParent && realParent !== window) {
+                      realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: searchDest }, '*');
+                    }
+                    window.location.href = '/api/proxy?url=' + encodeURIComponent(searchDest);
+                    return;
+                  }
+                  if (method === 'GET' && action) {
+                    var resolvedAction = new URL(action, document.baseURI || window.location.href);
+                    resolvedAction.search = params.toString();
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (realParent && realParent !== window) {
+                      realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: resolvedAction.href }, '*');
+                    }
+                    window.location.href = '/api/proxy?url=' + encodeURIComponent(resolvedAction.href);
+                  }
+                } catch(err) {}
+              }
+            }, true);
+
+            // 6. WebView Memory Optimization: Purge Back-Forward Cache (bfcache) on Tab Sleep
+            window.addEventListener('message', function(e) {
+              if (e.data && e.data.type === 'OMARVIO_PURGE_BFCACHE') {
+                try {
+                  var mediaEls = document.querySelectorAll('video, audio');
+                  for (var mi = 0; mi < mediaEls.length; mi++) {
+                    try {
+                      mediaEls[mi].pause();
+                      mediaEls[mi].removeAttribute('src');
+                      mediaEls[mi].load();
+                    } catch(mErr) {}
+                  }
+                  var canvases = document.querySelectorAll('canvas');
+                  for (var ci = 0; ci < canvases.length; ci++) {
+                    try { canvases[ci].width = 1; canvases[ci].height = 1; } catch(cErr) {}
+                  }
+                  if (typeof window.dispatchEvent === 'function') {
+                    try {
+                      var ev = new PageTransitionEvent('pagehide', { persisted: false });
+                      window.dispatchEvent(ev);
+                    } catch(pErr) {}
+                  }
+                } catch(err) {}
+              }
+            });
+
+            // 7. Safeguard history.pushState & replaceState inside proxy frame
+            try {
+              var origPushState = window.history.pushState;
+              var origReplaceState = window.history.replaceState;
+              window.history.pushState = function(state, title, url) {
+                try {
+                  if (url && typeof url === 'string' && !url.startsWith('/api/proxy')) {
+                    var resolved = new URL(url, document.baseURI || '${finalUrl}').href;
+                    if (realParent && realParent !== window) {
+                      realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: resolved }, '*');
+                    }
+                    return origPushState.call(window.history, state, title, '/api/proxy?url=' + encodeURIComponent(resolved));
+                  }
+                  return origPushState.apply(window.history, arguments);
+                } catch(e) {}
+              };
+              window.history.replaceState = function(state, title, url) {
+                try {
+                  if (url && typeof url === 'string' && !url.startsWith('/api/proxy')) {
+                    var resolved = new URL(url, document.baseURI || '${finalUrl}').href;
+                    return origReplaceState.call(window.history, state, title, '/api/proxy?url=' + encodeURIComponent(resolved));
+                  }
+                  return origReplaceState.apply(window.history, arguments);
+                } catch(e) {}
+              };
+            } catch(hErr) {}
+          })();
+        </script>
+      `;
+
+      if (/<\/head>/i.test(html)) {
+        html = html.replace(/<\/head>/i, `${interceptor}</head>`);
+      } else if (/<\/body>/i.test(html)) {
+        html = html.replace(/<\/body>/i, `${interceptor}</body>`);
+      } else {
+        html = `${html}${interceptor}`;
+      }
+
+      newHeaders.set('Content-Type', 'text/html; charset=utf-8');
+      return new Response(html, {
+        status: response.status,
+        headers: newHeaders,
+      });
+    }
+
+    // Stream binary assets (CSS, JS, images, audio, video)
+    return new Response(response.body, {
+      status: response.status,
+      headers: newHeaders,
+    });
+  } catch (err: any) {
+    return new Response(
+      `<!DOCTYPE html><html><head><meta charset="utf-8"><title>OMARVIO Edge</title><style>body{background:#070a14;color:#e2e8f0;font-family:sans-serif;text-align:center;padding:30px;}</style></head><body><h2>ওয়েবসাইট কানেকশন রিকভারি</h2><p>টার্গেট সার্ভারে সংযোগ সফল হয়নি।</p><p style="color:#38bdf8">${targetUrl}</p><button onclick="window.location.reload()" style="background:#06b6d4;color:#040817;padding:10px 20px;border-radius:12px;font-weight:bold;border:none;cursor:pointer">পুনরায় লোড করুন</button></body></html>`,
+      {
+        status: 200,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      }
+    );
+  }
+};
