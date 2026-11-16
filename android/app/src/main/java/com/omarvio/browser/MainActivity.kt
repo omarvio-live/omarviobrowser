@@ -133,7 +133,10 @@ private class OmarvioJsBridge(
     private val onOpenExternalUrl: (String, Boolean) -> Unit,
     private val onSetEngine: (String) -> Unit,
     private val onSetDesktop: (Boolean) -> Unit,
-    private val onClearData: () -> Unit
+    private val onClearData: () -> Unit,
+    private val onSetAdBlock: (Boolean) -> Unit,
+    private val onSetBlockCookies: (Boolean) -> Unit,
+    private val onOpenSettingsModal: () -> Unit
 ) {
     @JavascriptInterface
     fun openUrl(url: String) {
@@ -153,6 +156,21 @@ private class OmarvioJsBridge(
     @JavascriptInterface
     fun setDesktopMode(enabled: Boolean) {
         onSetDesktop(enabled)
+    }
+
+    @JavascriptInterface
+    fun setAdBlockEnabled(enabled: Boolean) {
+        onSetAdBlock(enabled)
+    }
+
+    @JavascriptInterface
+    fun setBlockThirdPartyCookies(blocked: Boolean) {
+        onSetBlockCookies(blocked)
+    }
+
+    @JavascriptInterface
+    fun openNativeSettings() {
+        onOpenSettingsModal()
     }
 
     @JavascriptInterface
@@ -343,8 +361,47 @@ fun OmarVioBrowserApp(
     var selectedEngineId by remember {
         mutableStateOf(prefs.getString("selected_engine", "google") ?: "google")
     }
+    var adBlockEnabled by remember { mutableStateOf(prefs.getBoolean("ad_block_enabled", true)) }
+    var blockThirdPartyCookies by remember { mutableStateOf(prefs.getBoolean("block_third_party_cookies", true)) }
+    var doNotTrackEnabled by remember { mutableStateOf(prefs.getBoolean("do_not_track_enabled", true)) }
+    var httpsOnlyMode by remember { mutableStateOf(prefs.getBoolean("https_only_enabled", false)) }
+    var isJsEnabled by remember { mutableStateOf(prefs.getBoolean("javascript_enabled", true)) }
+    var forceDarkWeb by remember { mutableStateOf(prefs.getBoolean("force_dark_web", false)) }
+    var saveHistory by remember { mutableStateOf(prefs.getBoolean("save_history_enabled", true)) }
+    var textZoomPercent by remember { mutableIntStateOf(prefs.getInt("text_zoom_percent", 100)) }
+
     val blockedCount by AdBlockEngine.blockedCountFlow.collectAsState()
     var internalWebView: WebView? by remember { mutableStateOf(null) }
+
+    fun syncPrivacyAndWebSettings() {
+        AdBlockEngine.adBlockEnabled = adBlockEnabled
+        AdBlockEngine.stripTrackingParamsEnabled = adBlockEnabled
+        AdBlockEngine.httpsOnlyEnabled = httpsOnlyMode
+        AdBlockEngine.doNotTrackEnabled = doNotTrackEnabled
+        internalWebView?.let { wv ->
+            wv.settings.javaScriptEnabled = isJsEnabled
+            wv.settings.textZoom = textZoomPercent
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                WebSettingsCompat.setAlgorithmicDarkeningAllowed(wv.settings, forceDarkWeb)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                @Suppress("DEPRECATION")
+                wv.settings.forceDark = if (forceDarkWeb) WebSettings.FORCE_DARK_ON else WebSettings.FORCE_DARK_OFF
+            }
+            CookieManager.getInstance().setAcceptThirdPartyCookies(wv, !blockThirdPartyCookies)
+        }
+    }
+
+    LaunchedEffect(
+        adBlockEnabled,
+        blockThirdPartyCookies,
+        doNotTrackEnabled,
+        httpsOnlyMode,
+        isJsEnabled,
+        forceDarkWeb,
+        textZoomPercent
+    ) {
+        syncPrivacyAndWebSettings()
+    }
 
     // Persisted Bookmarks & History
     val bookmarks = remember {
@@ -389,7 +446,7 @@ fun OmarVioBrowserApp(
     }
 
     fun addHistoryEntry(title: String, url: String) {
-        if (activeTab.isIncognito || url.isBlank() || url.startsWith("https://omarvio-browser.pages.dev")) return
+        if (!saveHistory || activeTab.isIncognito || url.isBlank() || url.startsWith("https://omarvio-browser.pages.dev")) return
         historyList.removeAll { it.url == url }
         historyList.add(0, SavedEntry(title.ifBlank { url }, url))
         if (historyList.size > 80) historyList.removeAt(historyList.lastIndex)
@@ -404,6 +461,12 @@ fun OmarVioBrowserApp(
     var showHistoryModal by remember { mutableStateOf(false) }
     var showFindBar by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
+    var showNativeSettingsModal by remember { mutableStateOf(false) }
+    var showReaderModal by remember { mutableStateOf(false) }
+    var readerTitle by remember { mutableStateOf("") }
+    var readerContent by remember { mutableStateOf("") }
+    var readerTheme by remember { mutableIntStateOf(0) } // 0 = Dark, 1 = Sepia, 2 = Light
+    var readerFontSize by remember { mutableIntStateOf(16) }
 
     // Synced Web Home UI + Auto-Update
     var homeWebView: WebView? by remember { mutableStateOf(null) }
@@ -453,7 +516,7 @@ fun OmarVioBrowserApp(
         val trimmed = rawInput.trim()
         if (trimmed.isEmpty()) return
 
-        val target = if (
+        var target = if (
             trimmed.startsWith("http://") ||
             trimmed.startsWith("https://") ||
             (trimmed.contains(".") && !trimmed.contains(" "))
@@ -463,6 +526,11 @@ fun OmarVioBrowserApp(
             val activeEngine = engines.firstOrNull { it.id == selectedEngineId } ?: engines.first()
             "${activeEngine.searchBase}${Uri.encode(trimmed)}"
         }
+
+        if (httpsOnlyMode && target.startsWith("http://")) {
+            target = "https://" + target.removePrefix("http://")
+        }
+        target = AdBlockEngine.stripTrackingParameters(target)
 
         val currentIdx = activeTabIndex.coerceIn(0, tabs.lastIndex)
         val cur = tabs[currentIdx]
@@ -474,7 +542,67 @@ fun OmarVioBrowserApp(
         currentUrl = target
         inputUrl = target
         homeSearchText = ""
-        internalWebView?.loadUrl(target)
+        showReaderModal = false
+        internalWebView?.let { wv ->
+            if (doNotTrackEnabled) {
+                wv.loadUrl(target, mapOf("DNT" to "1", "Sec-GPC" to "1"))
+            } else {
+                wv.loadUrl(target)
+            }
+        }
+    }
+
+    fun openReadingMode() {
+        val wv = internalWebView
+        if (wv == null || isHomeVisible) return
+        val readerScript = """
+            (function() {
+                try {
+                    var clone = document.body ? document.body.cloneNode(true) : null;
+                    if (!clone) return JSON.stringify({ title: document.title || '', content: '' });
+                    var kill = clone.querySelectorAll('script, style, noscript, iframe, nav, aside, header, footer, form, [class*="sidebar"], [id*="sidebar"], [class*="ad-"], [id*="ad-"], [class*="cookie"], [class*="consent"], [class*="comment"]');
+                    for (var i = 0; i < kill.length; i++) kill[i].remove();
+                    var root = clone.querySelector('article') || clone.querySelector('main') || clone;
+                    var els = root.querySelectorAll('h1, h2, h3, p, blockquote, li');
+                    var seen = {};
+                    var out = [];
+                    for (var j = 0; j < els.length; j++) {
+                        var t = (els[j].innerText || '').replace(/\s+/g, ' ').trim();
+                        if (!t) continue;
+                        var tag = els[j].tagName;
+                        if ((tag === 'P' || tag === 'LI') && t.length < 25) continue;
+                        if (seen[t]) continue;
+                        seen[t] = true;
+                        out.push(t);
+                    }
+                    var bodyText = out.length > 0 ? out.join('\n\n') : (root.innerText || '').trim();
+                    return JSON.stringify({ title: document.title || '', content: bodyText.slice(0, 12000) });
+                } catch (e) {
+                    return JSON.stringify({ title: document.title || '', content: '' });
+                }
+            })();
+        """.trimIndent()
+        wv.evaluateJavascript(readerScript) { rawJson ->
+            try {
+                val parsedText = if (rawJson != null && rawJson.startsWith("\"")) {
+                    JSONObject("{\"v\":$rawJson}").optString("v", "{}")
+                } else {
+                    rawJson ?: "{}"
+                }
+                val obj = JSONObject(parsedText)
+                val t = obj.optString("title", pageTitle).ifBlank { pageTitle }
+                val c = obj.optString("content", "").trim()
+                if (c.isNotEmpty()) {
+                    readerTitle = t
+                    readerContent = c
+                    showReaderModal = true
+                } else {
+                    Toast.makeText(context, "এই পৃষ্ঠায় পড়ার মতো টেক্সট পাওয়া যায়নি", Toast.LENGTH_SHORT).show()
+                }
+            } catch (_: Exception) {
+                Toast.makeText(context, "রিডার মোড চালু করা যায়নি", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     fun goToHome(homeUrl: String = CLOUDFLARE_HOME_URL) {
@@ -614,13 +742,15 @@ fun OmarVioBrowserApp(
         }
     }
 
-    BackHandler(enabled = showChromeMenu || showEngineModal || showTabsModal || showBookmarksModal || showHistoryModal || showFindBar || !isHomeVisible || fullscreenView != null) {
+    BackHandler(enabled = showChromeMenu || showEngineModal || showTabsModal || showBookmarksModal || showHistoryModal || showFindBar || showNativeSettingsModal || showReaderModal || !isHomeVisible || fullscreenView != null) {
         when {
             fullscreenView != null -> {
                 fullscreenCallback?.onCustomViewHidden()
                 fullscreenView = null
                 fullscreenCallback = null
             }
+            showReaderModal -> showReaderModal = false
+            showNativeSettingsModal -> showNativeSettingsModal = false
             showChromeMenu -> showChromeMenu = false
             showEngineModal -> showEngineModal = false
             showTabsModal -> showTabsModal = false
@@ -758,6 +888,38 @@ fun OmarVioBrowserApp(
                                         modifier = Modifier.size(16.dp)
                                     )
                                 }
+                            }
+                        }
+
+                        // AdBlock & Privacy Shield Counter Badge (Brave/Chrome style)
+                        Row(
+                            modifier = Modifier
+                                .height(34.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (adBlockEnabled) Color(0xFF082F49) else Color(0xFF28292C))
+                                .border(
+                                    1.dp,
+                                    if (adBlockEnabled) Color(0xFF0EA5E9).copy(alpha = 0.5f) else Color(0xFF5F6368),
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .clickable { showNativeSettingsModal = true }
+                                .padding(horizontal = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Shield,
+                                contentDescription = "Privacy Shields",
+                                tint = if (adBlockEnabled) Color(0xFF38BDF8) else Color(0xFF9AA0A6),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            if (blockedCount > 0) {
+                                Text(
+                                    text = "$blockedCount",
+                                    color = Color(0xFFBAE6FD),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
 
@@ -933,18 +1095,19 @@ fun OmarVioBrowserApp(
                                 @Suppress("DEPRECATION")
                                 setRenderPriority(WebSettings.RenderPriority.HIGH)
 
-                                javaScriptEnabled = true
+                                javaScriptEnabled = isJsEnabled
                                 domStorageEnabled = true
                                 databaseEnabled = true
                                 javaScriptCanOpenWindowsAutomatically = true
                                 mediaPlaybackRequiresUserGesture = false
                                 mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                textZoom = textZoomPercent
 
                                 if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-                                    WebSettingsCompat.setAlgorithmicDarkeningAllowed(this, false)
+                                    WebSettingsCompat.setAlgorithmicDarkeningAllowed(this, forceDarkWeb)
                                 } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                                     @Suppress("DEPRECATION")
-                                    forceDark = WebSettings.FORCE_DARK_OFF
+                                    forceDark = if (forceDarkWeb) WebSettings.FORCE_DARK_ON else WebSettings.FORCE_DARK_OFF
                                 }
 
                                 setSupportMultipleWindows(false)
@@ -962,7 +1125,7 @@ fun OmarVioBrowserApp(
                             val browserWebView = this
                             CookieManager.getInstance().apply {
                                 setAcceptCookie(true)
-                                setAcceptThirdPartyCookies(browserWebView, true)
+                                setAcceptThirdPartyCookies(browserWebView, !blockThirdPartyCookies)
                             }
 
                             webChromeClient = OmarVioWebChromeClient(
@@ -1080,6 +1243,21 @@ fun OmarVioBrowserApp(
                                                 },
                                                 onClearData = {
                                                     post { clearAllBrowserData() }
+                                                },
+                                                onSetAdBlock = { enabled ->
+                                                    post {
+                                                        adBlockEnabled = enabled
+                                                        prefs.edit().putBoolean("ad_block_enabled", enabled).apply()
+                                                    }
+                                                },
+                                                onSetBlockCookies = { blocked ->
+                                                    post {
+                                                        blockThirdPartyCookies = blocked
+                                                        prefs.edit().putBoolean("block_third_party_cookies", blocked).apply()
+                                                    }
+                                                },
+                                                onOpenSettingsModal = {
+                                                    post { showNativeSettingsModal = true }
                                                 }
                                             ),
                                             "OmarvioAndroid"
@@ -1418,6 +1596,15 @@ fun OmarVioBrowserApp(
                         showChromeMenu = false
                         showEngineModal = true
                     }
+                    if (!isHomeVisible) {
+                        ChromeMenuRow(
+                            icon = Icons.Default.MenuBook,
+                            label = if (showReaderModal) "Exit Reading mode" else "Show Reading mode"
+                        ) {
+                            showChromeMenu = false
+                            if (showReaderModal) showReaderModal = false else openReadingMode()
+                        }
+                    }
                     ChromeMenuRow(Icons.Default.FindInPage, "Find in page") {
                         showChromeMenu = false
                         showFindBar = true
@@ -1429,14 +1616,21 @@ fun OmarVioBrowserApp(
                         showChromeMenu = false
                         toggleDesktopMode()
                     }
-                    ChromeMenuRow(Icons.Default.Shield, "AdBlock ($blockedCount ব্লকড)") {
+                    ChromeMenuRow(
+                        icon = Icons.Default.Shield,
+                        label = if (adBlockEnabled) "Privacy Shields ($blockedCount blocked)" else "Privacy Shields (Paused)"
+                    ) {
                         showChromeMenu = false
-                        Toast.makeText(context, "🛡️ $blockedCount টি বিজ্ঞাপন ও ট্র্যাকার ব্লক করা হয়েছে", Toast.LENGTH_SHORT).show()
+                        showNativeSettingsModal = true
                     }
 
                     HorizontalDivider(color = Color(0xFF3C4043))
 
-                    ChromeMenuRow(Icons.Default.Settings, "Settings & Customize") {
+                    ChromeMenuRow(Icons.Default.Settings, "Browser Settings (Chrome / Shields)") {
+                        showChromeMenu = false
+                        showNativeSettingsModal = true
+                    }
+                    ChromeMenuRow(Icons.Default.Tune, "Customize Home (Web UI)") {
                         showChromeMenu = false
                         goToHome(CLOUDFLARE_SETTINGS_URL)
                     }
@@ -1633,6 +1827,328 @@ fun OmarVioBrowserApp(
             )
         }
 
+        // =========================================================================
+        // CHROME / FIREFOX / BRAVE NATIVE BROWSER SETTINGS MODAL
+        // =========================================================================
+        if (showNativeSettingsModal) {
+            Dialog(onDismissRequest = { showNativeSettingsModal = false }) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 620.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color(0xFF18191C))
+                        .border(1.dp, Color(0xFF3C4043), RoundedCornerShape(24.dp))
+                ) {
+                    // Header
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF202124))
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Settings, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(22.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text("OMARVIO Settings", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                Text("Chrome · Firefox · Brave Controls · v$installedVersion", color = Color(0xFF9AA0A6), fontSize = 11.sp)
+                            }
+                        }
+                        IconButton(onClick = { showNativeSettingsModal = false }, modifier = Modifier.size(34.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF9AA0A6))
+                        }
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text("PRIVACY & AD-BLOCK SHIELDS", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.Shield,
+                            title = "Ad & Tracker Blocker",
+                            subtitle = "বিজ্ঞাপন, পপ-আপ ও ট্র্যাকিং স্ক্রিপ্ট বন্ধ করুন ($blockedCount blocked)",
+                            checked = adBlockEnabled,
+                            onCheckedChange = {
+                                adBlockEnabled = it
+                                prefs.edit().putBoolean("ad_block_enabled", it).apply()
+                            }
+                        )
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.Cookie,
+                            title = "Block Third-Party Cookies",
+                            subtitle = "অন্যান্য সাইটের ক্রস-সাইট ট্র্যাকিং কুকি বন্ধ রাখুন",
+                            checked = blockThirdPartyCookies,
+                            onCheckedChange = {
+                                blockThirdPartyCookies = it
+                                prefs.edit().putBoolean("block_third_party_cookies", it).apply()
+                            }
+                        )
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.PrivacyTip,
+                            title = "Send 'Do Not Track' & GPC",
+                            subtitle = "ওয়েবসাইটগুলোতে DNT: 1 ও Sec-GPC প্রাইভেসি সিগন্যাল পাঠান",
+                            checked = doNotTrackEnabled,
+                            onCheckedChange = {
+                                doNotTrackEnabled = it
+                                prefs.edit().putBoolean("do_not_track_enabled", it).apply()
+                            }
+                        )
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.Lock,
+                            title = "HTTPS-Only Mode",
+                            subtitle = "সকল ওয়েবসাইট এনক্রিপ্টেড HTTPS সংযোগে আপগ্রেড করুন",
+                            checked = httpsOnlyMode,
+                            onCheckedChange = {
+                                httpsOnlyMode = it
+                                prefs.edit().putBoolean("https_only_enabled", it).apply()
+                            }
+                        )
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.History,
+                            title = "Save Browsing History",
+                            subtitle = "ভিজিট করা সাইটের লোকাল হিস্ট্রি সংরক্ষণ করুন",
+                            checked = saveHistory,
+                            onCheckedChange = {
+                                saveHistory = it
+                                prefs.edit().putBoolean("save_history_enabled", it).apply()
+                            }
+                        )
+
+                        HorizontalDivider(color = Color(0xFF2D2F34))
+                        Text("SEARCH & SITE SETTINGS", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF24262B))
+                                .clickable {
+                                    showNativeSettingsModal = false
+                                    showEngineModal = true
+                                }
+                                .padding(horizontal = 12.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.Search, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text("Search Engine", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("বর্তমান: ${activeEngine.label} (${activeEngine.badge})", color = Color(0xFF9AA0A6), fontSize = 11.sp)
+                                }
+                            }
+                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Color(0xFF9AA0A6))
+                        }
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.Laptop,
+                            title = "Desktop Site",
+                            subtitle = "ওয়েবসাইটগুলো কম্পিউটার ভার্সনে লোড করুন",
+                            checked = isDesktopMode,
+                            onCheckedChange = { toggleDesktopMode(it) }
+                        )
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.Code,
+                            title = "JavaScript",
+                            subtitle = "সাইটের ডাইনামিক ফিচার ও প্লেয়ার চালু রাখুন",
+                            checked = isJsEnabled,
+                            onCheckedChange = {
+                                isJsEnabled = it
+                                prefs.edit().putBoolean("javascript_enabled", it).apply()
+                                if (!isHomeVisible) internalWebView?.reload()
+                            }
+                        )
+
+                        HorizontalDivider(color = Color(0xFF2D2F34))
+                        Text("APPEARANCE & TEXT SCALING", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.DarkMode,
+                            title = "Force Dark Mode on Webpages",
+                            subtitle = "সাদা ব্যাকগ্রাউন্ডের ওয়েবসাইটগুলো ডার্ক থিমে দেখুন",
+                            checked = forceDarkWeb,
+                            onCheckedChange = {
+                                forceDarkWeb = it
+                                prefs.edit().putBoolean("force_dark_web", it).apply()
+                            }
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF24262B))
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.TextFields, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text("Text Size", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("পৃষ্ঠার ফন্ট জুম: $textZoomPercent%", color = Color(0xFF9AA0A6), fontSize = 11.sp)
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF35373D))
+                                        .clickable {
+                                            textZoomPercent = (textZoomPercent - 10).coerceAtLeast(75)
+                                            prefs.edit().putInt("text_zoom_percent", textZoomPercent).apply()
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) { Text("−", color = Color.White, fontWeight = FontWeight.Bold) }
+                                Box(
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF35373D))
+                                        .clickable {
+                                            textZoomPercent = (textZoomPercent + 10).coerceAtMost(150)
+                                            prefs.edit().putInt("text_zoom_percent", textZoomPercent).apply()
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) { Text("+", color = Color.White, fontWeight = FontWeight.Bold) }
+                            }
+                        }
+
+                        HorizontalDivider(color = Color(0xFF2D2F34))
+                        Text("DATA & STORAGE", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF3B1219))
+                                .border(1.dp, Color(0xFFFB7185).copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+                                .clickable {
+                                    clearAllBrowserData()
+                                    showNativeSettingsModal = false
+                                }
+                                .padding(horizontal = 12.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFFB7185), modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("Clear Browsing Data", color = Color(0xFFFECDD3), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                Text("হিস্ট্রি, কুকি, ক্যাশ ও সাইট ডেটা মুছে ফেলুন", color = Color(0xFFFDA4AF), fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // SIMPLIFIED READING MODE OVERLAY (Distraction-Free Text Reader)
+        // =========================================================================
+        if (showReaderModal) {
+            val readerBg = when (readerTheme) {
+                1 -> Color(0xFFF6EFDE)
+                2 -> Color(0xFFFAFAFA)
+                else -> Color(0xFF0B0F19)
+            }
+            val readerFg = when (readerTheme) {
+                1 -> Color(0xFF3D3122)
+                2 -> Color(0xFF1E293B)
+                else -> Color(0xFFE2E8F0)
+            }
+            Dialog(onDismissRequest = { showReaderModal = false }) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.9f)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(readerBg)
+                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(22.dp))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF18191C))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(Icons.Default.MenuBook, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(18.dp))
+                            Text("Reading Mode", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(0 to Color(0xFF0F172A), 1 to Color(0xFFF6EFDE), 2 to Color.White).forEach { (id, swatch) ->
+                                Box(
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clip(CircleShape)
+                                        .background(swatch)
+                                        .border(if (readerTheme == id) 2.dp else 1.dp, if (readerTheme == id) Color(0xFF38BDF8) else Color.Gray, CircleShape)
+                                        .clickable { readerTheme = id }
+                                )
+                            }
+                            Text(
+                                "A−",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                modifier = Modifier.clickable { readerFontSize = (readerFontSize - 2).coerceAtLeast(13) }.padding(4.dp)
+                            )
+                            Text(
+                                "A+",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                modifier = Modifier.clickable { readerFontSize = (readerFontSize + 2).coerceAtMost(24) }.padding(4.dp)
+                            )
+                            IconButton(onClick = { showReaderModal = false }, modifier = Modifier.size(30.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF9AA0A6), modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState())
+                            .padding(18.dp)
+                    ) {
+                        Text(
+                            text = readerTitle,
+                            color = readerFg,
+                            fontSize = (readerFontSize + 4).sp,
+                            fontWeight = FontWeight.Bold,
+                            lineHeight = (readerFontSize + 10).sp
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider(color = readerFg.copy(alpha = 0.18f))
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = readerContent,
+                            color = readerFg.copy(alpha = 0.92f),
+                            fontSize = readerFontSize.sp,
+                            lineHeight = (readerFontSize + 9).sp
+                        )
+                    }
+                }
+            }
+        }
+
         // Fullscreen Video Container Overlay
         fullscreenView?.let { customView ->
             AndroidView(
@@ -1650,6 +2166,45 @@ fun OmarVioBrowserApp(
                 }
             )
         }
+    }
+}
+
+@Composable
+private fun NativeSettingToggleRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFF24262B))
+            .clickable { onCheckedChange(!checked) }
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Icon(icon, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(20.dp))
+            Spacer(modifier = Modifier.width(12.dp))
+            Column {
+                Text(title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(subtitle, color = Color(0xFF9AA0A6), fontSize = 11.sp, lineHeight = 14.sp)
+            }
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color(0xFF04101E),
+                checkedTrackColor = Color(0xFF38BDF8),
+                uncheckedThumbColor = Color(0xFF9AA0A6),
+                uncheckedTrackColor = Color(0xFF3C4043)
+            )
+        )
     }
 }
 

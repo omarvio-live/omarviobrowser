@@ -99,7 +99,7 @@ class UnifiedBrowserActivity : ComponentActivity() {
         }
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
-            setAcceptThirdPartyCookies(webView, true)
+            setAcceptThirdPartyCookies(webView, false)
         }
 
         webView.webViewClient = object : WebViewClient() {

@@ -38,6 +38,24 @@ export const TabBar: React.FC<TabBarProps> = ({
                   : 'bg-slate-950 text-slate-400 hover:text-slate-200 hover:bg-slate-900/50 border-transparent'
               }`}
             >
+              {/* Group Indicator Dot */}
+              {tab.groupId && (
+                <span
+                  title={tab.groupName || 'Tab Group'}
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    tab.groupColor === 'emerald'
+                      ? 'bg-emerald-400'
+                      : tab.groupColor === 'amber'
+                      ? 'bg-amber-400'
+                      : tab.groupColor === 'violet'
+                      ? 'bg-violet-400'
+                      : tab.groupColor === 'rose'
+                      ? 'bg-rose-400'
+                      : 'bg-cyan-400'
+                  }`}
+                />
+              )}
+
               {/* Tab Icon */}
               {tab.favicon ? (
                 <img

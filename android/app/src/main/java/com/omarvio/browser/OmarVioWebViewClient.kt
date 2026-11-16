@@ -14,8 +14,8 @@ import android.webkit.WebViewClient
 
 /**
  * OMARVIO BROWSER - Native Chromium WebView Client
- * Delivers 0ms direct network loading, ad-interception, secure URL tracking stripping,
- * SSL error handling to prevent blank screens, and overrides URL loading to stop external app launching.
+ * Delivers 0ms direct network loading, ad & tracker interception, HTTPS-Only upgrades,
+ * tracking parameter stripping, cosmetic ad suppression, and in-app navigation containment.
  */
 class OmarVioWebViewClient(
     private val context: Context,
@@ -31,16 +31,11 @@ class OmarVioWebViewClient(
     ): WebResourceResponse? {
         val url = request?.url?.toString()
         if (AdBlockEngine.isAdOrTracker(url)) {
-            // Block ad network request directly at the device socket level!
-            return AdBlockEngine.createEmptyResponse()
+            return AdBlockEngine.createEmptyResponse(url)
         }
         return super.shouldInterceptRequest(view, request)
     }
 
-    /**
-     * Override URL loading to strictly prevent external apps (Chrome, Play Store, YouTube app)
-     * from hijacking the browsing session and guarantee everything renders inside OmarVio.
-     */
     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
         val url = request?.url?.toString() ?: return false
         return handleUrlNavigation(view, url)
@@ -59,22 +54,19 @@ class OmarVioWebViewClient(
                 val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
                 val fallbackUrl = intent.getStringExtra("browser_fallback_url")
                 if (!fallbackUrl.isNullOrEmpty() && (fallbackUrl.startsWith("http://") || fallbackUrl.startsWith("https://"))) {
-                    // Route fallback web destination back into this OmarVio WebView
-                    view?.loadUrl(stripTrackingParameters(fallbackUrl))
+                    view?.loadUrl(AdBlockEngine.stripTrackingParameters(fallbackUrl))
                     return true
                 }
             } catch (_: Exception) {}
-            // Suppress opening external third-party apps
             return true
         }
 
-        // 2. Prevent external app launch for market://, vnd.youtube:, or browser redirects
+        // 2. Prevent external app hijack for market://, vnd.youtube:, or googlechrome://
         if (url.startsWith("market://") || url.startsWith("vnd.youtube:") || url.startsWith("googlechrome://")) {
-            // Keep user securely inside OmarVio
             return true
         }
 
-        // 3. For dialer or mail protocols that cannot be rendered in WebView
+        // 3. Dialer or mail protocols
         if (url.startsWith("tel:") || url.startsWith("mailto:") || url.startsWith("sms:")) {
             try {
                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
@@ -85,13 +77,13 @@ class OmarVioWebViewClient(
             return true
         }
 
-        // 4a. Auto-unwrap DuckDuckGo and Google intermediate redirect traps to directly open target sites
+        // 4a. Auto-unwrap DuckDuckGo and Google intermediate redirect traps
         if (url.contains("duckduckgo.com/l/?") || url.contains("uddg=")) {
             try {
                 val uri = Uri.parse(url)
                 val target = uri.getQueryParameter("uddg")
                 if (!target.isNullOrEmpty() && (target.startsWith("http://") || target.startsWith("https://"))) {
-                    view?.loadUrl(target)
+                    view?.loadUrl(AdBlockEngine.stripTrackingParameters(target))
                     return true
                 }
             } catch (_: Exception) {}
@@ -101,26 +93,31 @@ class OmarVioWebViewClient(
                 val uri = Uri.parse(url)
                 val target = uri.getQueryParameter("q") ?: uri.getQueryParameter("url")
                 if (!target.isNullOrEmpty() && (target.startsWith("http://") || target.startsWith("https://"))) {
-                    view?.loadUrl(target)
+                    view?.loadUrl(AdBlockEngine.stripTrackingParameters(target))
                     return true
                 }
             } catch (_: Exception) {}
         }
 
-        // 4b. Standard web navigation (http:// and https://)
+        // 4b. HTTPS-Only upgrade & tracking query parameter sanitization
+        if (url.startsWith("http://") && AdBlockEngine.httpsOnlyEnabled) {
+            val upgraded = "https://" + AdBlockEngine.stripTrackingParameters(url).removePrefix("http://")
+            view?.loadUrl(upgraded)
+            return true
+        }
+
         if (url.startsWith("http://") || url.startsWith("https://")) {
-            // Return false so Android WebView handles the navigation natively without creating loopback history entries
+            val stripped = AdBlockEngine.stripTrackingParameters(url)
+            if (stripped != url) {
+                view?.loadUrl(stripped)
+                return true
+            }
             return false
         }
 
         return true
     }
 
-    /**
-     * Critical for Step-by-Step Back Navigation in Android:
-     * Dispatched by WebView whenever visited history is updated (including pushState, SPA navigation & hash changes).
-     * Synchronizes canGoBack and canGoForward state instantly.
-     */
     override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
         super.doUpdateVisitedHistory(view, url, isReload)
         url?.let { onUrlChanged(it) }
@@ -132,16 +129,11 @@ class OmarVioWebViewClient(
         }
     }
 
-    /**
-     * Handle SSL errors to prevent persistent blank white screens.
-     * Default WebView behavior calls handler.cancel(), which immediately turns pages blank.
-     */
     override fun onReceivedSslError(
         view: WebView?,
         handler: SslErrorHandler?,
         error: SslError?
     ) {
-        // Proceed with SSL load to avoid blank screens on self-signed certs or intermediate certificate chains
         handler?.proceed()
     }
 
@@ -188,34 +180,37 @@ class OmarVioWebViewClient(
             )
         }
 
-        // Inject high-speed anti-ad style sheet
-        val cssInject = """
-            (function() {
-                if (!document.head) return;
-                var style = document.createElement('style');
-                style.textContent = '.ytp-ad-module, .fb-ad, div[id*="google_ads"], div[class*="ad-box"] { display: none !important; }';
-                document.head.appendChild(style);
-            })();
-        """.trimIndent()
-        view?.evaluateJavascript(cssInject, null)
-    }
-
-    private fun stripTrackingParameters(rawUrl: String): String {
-        return try {
-            val uri = Uri.parse(rawUrl)
-            val builder = uri.buildUpon().clearQuery()
-            for (param in uri.queryParameterNames) {
-                val pLower = param.lowercase()
-                if (pLower.startsWith("utm_") || pLower == "fbclid" || pLower == "gclid" || pLower == "si") {
-                    continue
-                }
-                for (valItem in uri.getQueryParameters(param)) {
-                    builder.appendQueryParameter(param, valItem)
-                }
-            }
-            builder.build().toString()
-        } catch (_: Exception) {
-            rawUrl
+        if (AdBlockEngine.adBlockEnabled) {
+            val shieldInject = """
+                (function() {
+                    try {
+                        if (document.head && !document.getElementById('omarvio-adblock-css')) {
+                            var style = document.createElement('style');
+                            style.id = 'omarvio-adblock-css';
+                            style.textContent = '.ytp-ad-module, .ytp-ad-player-overlay, .ytp-ad-text, .video-ads, .ad-container, .ad-interrupting, .fb-ad, .sponsored_ad, .ad-banner, .interstitial-ad, .overlay-ad, ins.adsbygoogle, div[id*="google_ads"], div[id*="taboola"], div[id*="outbrain"], div[class*="ad-box"], div[class*="ad-slot"], div[class*="ad-wrapper"], div[class*="popup-banner"], div[id*="cookie-banner"], div[class*="consent-modal"], div[id*="onetrust-consent-sdk"] { display: none !important; visibility: hidden !important; height: 0 !important; width: 0 !important; opacity: 0 !important; pointer-events: none !important; }';
+                            document.head.appendChild(style);
+                        }
+                        if (!window.__omarvioAdSkipInstalled) {
+                            window.__omarvioAdSkipInstalled = true;
+                            setInterval(function() {
+                                if (document.hidden) return;
+                                try {
+                                    var skip = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
+                                    if (skip) skip.click();
+                                    var v = document.querySelector('video');
+                                    var isAd = document.querySelector('.ad-showing, .ytp-ad-player-overlay');
+                                    if (v && isAd && !isNaN(v.duration) && v.duration > 0) {
+                                        v.currentTime = v.duration - 0.1;
+                                        v.playbackRate = 16.0;
+                                        v.muted = true;
+                                    }
+                                } catch(e) {}
+                            }, 800);
+                        }
+                    } catch(e) {}
+                })();
+            """.trimIndent()
+            view?.evaluateJavascript(shieldInject, null)
         }
     }
 }

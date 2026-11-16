@@ -90,6 +90,138 @@ export const getSanitizedSearchUrl = (query: string, preferredEngine?: string): 
   }
 };
 
+// Comprehensive Ad-Network, Telemetry & Tracker Host Blocklist (Shared by Proxy Backend & Client)
+export const AD_TRACKER_HOSTS = [
+  'doubleclick.net',
+  'googlesyndication.com',
+  'googleadservices.com',
+  'adservice.google.com',
+  'google-analytics.com',
+  'googletagmanager.com',
+  'googletagservices.com',
+  'pagead2.googlesyndication.com',
+  'adnxs.com',
+  'adsrvr.org',
+  'connect.facebook.net',
+  'criteo.com',
+  'criteo.net',
+  'taboola.com',
+  'outbrain.com',
+  'popads.net',
+  'propellerads.com',
+  'adsterra.com',
+  'effectivegatecpm.com',
+  'monetag.com',
+  'onclickads.net',
+  'hilltopads.net',
+  'mgid.com',
+  'exoclick.com',
+  'juicyads.com',
+  'trafficjunky.net',
+  'admob.com',
+  'applovin.com',
+  'appsflyer.com',
+  'adjust.com',
+  'branch.io',
+  'scorecardresearch.com',
+  'quantserve.com',
+  'pubmatic.com',
+  'rubiconproject.com',
+  'smartadserver.com',
+  'openx.net',
+  'casalemedia.com',
+  'bidswitch.net',
+  'moatads.com',
+  '2mdn.net',
+  'hotjar.com',
+  'clarity.ms',
+  'mixpanel.com',
+  'segment.io',
+  'segment.com',
+  'amplitude.com',
+  'chartbeat.com',
+  'omtrdc.net',
+  'advertising.com',
+  'zedo.com',
+  'revcontent.com',
+  'adroll.com',
+  'teads.tv',
+  'sharethrough.com',
+  'media.net',
+  'an.yandex.ru',
+  'mc.yandex.ru',
+];
+
+const AD_PATH_REGEX =
+  /(\/ads\/|\/adserver\/|\/popunder\/|\/pagead\/|google_ad_|analytics\.js|gtag\/js|fbevents\.js|pixel\.gif|\/tr\/?\?)/i;
+
+export const isAdOrTrackerUrl = (rawUrl: string): boolean => {
+  if (!rawUrl) return false;
+  try {
+    const parsed = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
+    const host = parsed.hostname.toLowerCase();
+    for (const blocked of AD_TRACKER_HOSTS) {
+      if (host === blocked || host.endsWith(`.${blocked}`)) {
+        return true;
+      }
+    }
+    if (host.endsWith('facebook.com') && parsed.pathname.startsWith('/tr')) {
+      return true;
+    }
+    return AD_PATH_REGEX.test(`${parsed.pathname}${parsed.search}`);
+  } catch {
+    return false;
+  }
+};
+
+export const stripTrackingFromHtml = (html: string): { html: string; blockedCount: number } => {
+  let blockedCount = 0;
+
+  // Strip known third-party ad/tracker external scripts
+  let cleaned = html.replace(
+    /<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/script>/gi,
+    (match, src) => {
+      if (isAdOrTrackerUrl(src)) {
+        blockedCount += 1;
+        return '';
+      }
+      return match;
+    }
+  );
+
+  // Strip known ad/tracker iframes
+  cleaned = cleaned.replace(
+    /<iframe\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/iframe>/gi,
+    (match, src) => {
+      if (isAdOrTrackerUrl(src)) {
+        blockedCount += 1;
+        return '';
+      }
+      return match;
+    }
+  );
+
+  // Strip 1x1 tracking pixels / ad beacon images
+  cleaned = cleaned.replace(
+    /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*\/?>/gi,
+    (match, src) => {
+      if (isAdOrTrackerUrl(src)) {
+        blockedCount += 1;
+        return '';
+      }
+      return match;
+    }
+  );
+
+  // Clean inline utm_*/fbclid/gclid from anchor hrefs lightly
+  cleaned = cleaned.replace(
+    /\bhref=(["'])(https?:\/\/[^"']+)\1/gi,
+    (_m, q, href) => `href=${q}${cleanTrackingParameters(href)}${q}`
+  );
+
+  return { html: cleaned, blockedCount };
+};
+
 // CSS injection for in-page aggressive ad & popup suppression (Milestone 14)
 export const AD_SUPPRESSION_CSS = `
   /* Omarvio Aggressive Ad-Block Shield (Milestone 14) */
@@ -100,10 +232,18 @@ export const AD_SUPPRESSION_CSS = `
   .ad-container,
   .ad-interrupting,
   div[id*="google_ads"],
+  div[id*="taboola"],
+  div[id*="outbrain"],
   div[class*="ad-box"],
+  div[class*="ad-slot"],
+  div[class*="ad-wrapper"],
   div[class*="sponsor"],
+  ins.adsbygoogle,
   iframe[src*="doubleclick"],
+  iframe[src*="googlesyndication"],
   iframe[src*="adservice"],
+  iframe[src*="taboola"],
+  iframe[src*="outbrain"],
   .fb-ad,
   .sponsored_ad,
   .ad-banner,
@@ -111,7 +251,8 @@ export const AD_SUPPRESSION_CSS = `
   .overlay-ad,
   div[class*="popup-banner"],
   div[id*="cookie-banner"],
-  div[class*="consent-modal"] {
+  div[class*="consent-modal"],
+  div[id*="onetrust-consent-sdk"] {
     display: none !important;
     visibility: hidden !important;
     height: 0 !important;

@@ -15,6 +15,90 @@ interface Env {
   APP_NAME?: string;
 }
 
+const EDGE_TRACKING_PARAMS = [
+  'fbclid', 'gclid', 'gbraid', 'wbraid', 'utm_source', 'utm_medium', 'utm_campaign',
+  'utm_term', 'utm_content', 'utm_id', 'si', 'igshid', 'yclid', 'mc_eid',
+  '_hsenc', '_hsmi', 'mkt_tok', 'ttclid', 'twclid', 'msclkid',
+];
+
+const EDGE_AD_HOSTS = [
+  'doubleclick.net', 'googlesyndication.com', 'googleadservices.com', 'adservice.google.com',
+  'google-analytics.com', 'googletagmanager.com', 'googletagservices.com', 'adnxs.com',
+  'adsrvr.org', 'connect.facebook.net', 'criteo.com', 'criteo.net', 'taboola.com',
+  'outbrain.com', 'popads.net', 'propellerads.com', 'adsterra.com', 'effectivegatecpm.com',
+  'monetag.com', 'onclickads.net', 'hilltopads.net', 'mgid.com', 'exoclick.com',
+  'scorecardresearch.com', 'quantserve.com', 'pubmatic.com', 'rubiconproject.com',
+  'smartadserver.com', 'openx.net', 'hotjar.com', 'clarity.ms', 'mixpanel.com',
+  'segment.io', 'amplitude.com', 'moatads.com', '2mdn.net', 'an.yandex.ru', 'mc.yandex.ru',
+];
+
+function edgeCleanTrackingParams(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    let changed = false;
+    for (const p of EDGE_TRACKING_PARAMS) {
+      if (u.searchParams.has(p)) {
+        u.searchParams.delete(p);
+        changed = true;
+      }
+    }
+    return changed ? u.toString() : rawUrl;
+  } catch {
+    return rawUrl;
+  }
+}
+
+function edgeIsAdOrTracker(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
+    const h = u.hostname.toLowerCase();
+    for (const blocked of EDGE_AD_HOSTS) {
+      if (h === blocked || h.endsWith(`.${blocked}`)) return true;
+    }
+    if (h.endsWith('facebook.com') && u.pathname.startsWith('/tr')) return true;
+    return /(\/ads\/|\/adserver\/|\/popunder\/|\/pagead\/|google_ad_|analytics\.js|gtag\/js|fbevents\.js)/i.test(
+      `${u.pathname}${u.search}`
+    );
+  } catch {
+    return false;
+  }
+}
+
+function edgeStripTrackersFromHtml(html: string): { html: string; blockedCount: number } {
+  let blockedCount = 0;
+  let cleaned = html.replace(
+    /<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/script>/gi,
+    (m, src) => {
+      if (edgeIsAdOrTracker(src)) {
+        blockedCount += 1;
+        return '';
+      }
+      return m;
+    }
+  );
+  cleaned = cleaned.replace(
+    /<iframe\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/iframe>/gi,
+    (m, src) => {
+      if (edgeIsAdOrTracker(src)) {
+        blockedCount += 1;
+        return '';
+      }
+      return m;
+    }
+  );
+  cleaned = cleaned.replace(
+    /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*\/?>/gi,
+    (m, src) => {
+      if (edgeIsAdOrTracker(src)) {
+        blockedCount += 1;
+        return '';
+      }
+      return m;
+    }
+  );
+  return { html: cleaned, blockedCount };
+}
+
 export const onRequest: PagesFunction<Env> = async (context) => {
   const { request } = context;
   const urlObj = new URL(request.url);
@@ -99,6 +183,21 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     }
   } catch {}
 
+  targetUrl = edgeCleanTrackingParams(targetUrl);
+
+  if (edgeIsAdOrTracker(targetUrl)) {
+    return new Response('', {
+      status: /\.js($|\?)/i.test(targetUrl) ? 200 : 204,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': /\.js($|\?)/i.test(targetUrl)
+          ? 'application/javascript; charset=utf-8'
+          : 'text/plain; charset=utf-8',
+        'X-Omarvio-Blocked': 'tracker',
+      },
+    });
+  }
+
   try {
     const response = await fetch(targetUrl, {
       method: request.method === 'POST' ? 'POST' : 'GET',
@@ -109,11 +208,13 @@ export const onRequest: PagesFunction<Env> = async (context) => {
           'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
         'Upgrade-Insecure-Requests': '1',
+        'DNT': '1',
+        'Sec-GPC': '1',
       },
       redirect: 'follow',
     });
 
-    const finalUrl = response.url || targetUrl;
+    const finalUrl = edgeCleanTrackingParams(response.url || targetUrl);
     const contentType = response.headers.get('content-type') || 'text/html';
 
     // Clone response headers and delete ALL framing/decoding blockers
@@ -395,6 +496,13 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         );
       }
 
+      // 0. Strip ad/tracker scripts, pixels, and ad iframes at the Cloudflare Edge
+      const edgeStripped = edgeStripTrackersFromHtml(html);
+      html = edgeStripped.html;
+      if (edgeStripped.blockedCount > 0) {
+        newHeaders.set('X-Omarvio-Trackers-Stripped', String(edgeStripped.blockedCount));
+      }
+
       // 1. Remove restrictive meta tags and prevent automatic refresh/redirect traps
       html = html.replace(
         /<meta[^>]+http-equiv=["']?(content-security-policy|x-frame-options|refresh)["']?[^>]*>/gi,
@@ -418,9 +526,12 @@ export const onRequest: PagesFunction<Env> = async (context) => {
             overscroll-behavior-y: contain !important;
           }
           .ytp-ad-module, .ytp-ad-player-overlay, .ytp-ad-text, .video-ads, .ad-container, .ad-interrupting,
-          div[id*="google_ads"], div[class*="ad-box"], div[class*="sponsor"], iframe[src*="doubleclick"],
-          iframe[src*="adservice"], .fb-ad, .sponsored_ad, .ad-banner, .interstitial-ad, .overlay-ad,
-          div[class*="popup-banner"], div[id*="cookie-banner"], div[class*="consent-modal"] {
+          div[id*="google_ads"], div[id*="taboola"], div[id*="outbrain"], div[class*="ad-box"],
+          div[class*="ad-slot"], div[class*="ad-wrapper"], div[class*="sponsor"], ins.adsbygoogle,
+          iframe[src*="doubleclick"], iframe[src*="googlesyndication"], iframe[src*="adservice"],
+          iframe[src*="taboola"], iframe[src*="outbrain"], .fb-ad, .sponsored_ad, .ad-banner,
+          .interstitial-ad, .overlay-ad, div[class*="popup-banner"], div[id*="cookie-banner"],
+          div[class*="consent-modal"], div[id*="onetrust-consent-sdk"] {
             display: none !important;
             visibility: hidden !important;
             height: 0 !important;
@@ -429,6 +540,27 @@ export const onRequest: PagesFunction<Env> = async (context) => {
             pointer-events: none !important;
           }
         </style>
+        <script>
+          (function() {
+            var adSkipTimer = setInterval(function() {
+              if (document.hidden) return;
+              try {
+                var skip = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
+                if (skip) skip.click();
+                var v = document.querySelector('video');
+                var isAd = document.querySelector('.ad-showing, .ytp-ad-player-overlay');
+                if (v && isAd && !isNaN(v.duration) && v.duration > 0) {
+                  v.currentTime = v.duration - 0.1;
+                  v.playbackRate = 16.0;
+                  v.muted = true;
+                }
+              } catch(e) {}
+            }, 800);
+            document.addEventListener('visibilitychange', function() {
+              if (document.hidden && adSkipTimer) { clearInterval(adSkipTimer); adSkipTimer = null; }
+            });
+          })();
+        </script>
         <script>
           (function() {
             var realParent = window.parent;

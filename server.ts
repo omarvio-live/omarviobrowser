@@ -15,6 +15,13 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { executeGatewaySearch, fetchSearchSuggestions } from './src/engine/search/searchGateway';
 import { extractReadableArticleFromHtml } from './src/engine/readerExtractor';
+import {
+  cleanTrackingParameters,
+  isAdOrTrackerUrl,
+  stripTrackingFromHtml,
+  AD_SUPPRESSION_CSS,
+  AD_FAST_SKIP_SCRIPT,
+} from './src/engine/adblocker';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -199,6 +206,24 @@ async function startServer() {
       }
     } catch {}
 
+    // Strip surveillance & tracking query parameters (fbclid, gclid, utm_*, ttclid, etc.)
+    targetUrl = cleanTrackingParameters(targetUrl);
+
+    // Block direct ad-network, pixel & telemetry URLs cleanly at server edge (0ms)
+    if (isAdOrTrackerUrl(targetUrl)) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('X-Omarvio-Blocked', 'tracker');
+      if (/\.js($|\?)/i.test(targetUrl)) {
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        return res.status(200).send('/* blocked by Omarvio Shield */');
+      }
+      if (/\.css($|\?)/i.test(targetUrl)) {
+        res.setHeader('Content-Type', 'text/css; charset=utf-8');
+        return res.status(200).send('/* blocked by Omarvio Shield */');
+      }
+      return res.status(204).end();
+    }
+
     // Check fast in-memory cache for static assets (images, css, js, fonts)
     const isStaticAsset = targetUrl.match(/\.(css|js|png|jpg|jpeg|gif|webp|svg|woff2?|ttf|ico)($|\?)/i);
     const cached = proxyMemoryCache.get(targetUrl);
@@ -209,9 +234,10 @@ async function startServer() {
       return res.status(cached.status).send(cached.body);
     }
 
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 12000);
+      timeout = setTimeout(() => controller.abort(), 14000);
 
       const fetchHeaders: Record<string, string> = {
         'User-Agent':
@@ -220,17 +246,32 @@ async function startServer() {
           'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
         'Upgrade-Insecure-Requests': '1',
+        'DNT': '1',
+        'Sec-GPC': '1',
       };
 
-      const response = await fetch(targetUrl, {
+      const fetchInit: RequestInit = {
         method: req.method === 'POST' ? 'POST' : 'GET',
         signal: controller.signal,
         headers: fetchHeaders,
         redirect: 'follow',
-      });
-      clearTimeout(timeout);
+      };
 
-      const finalUrl = response.url || targetUrl;
+      if (req.method === 'POST' && req.body && typeof req.body === 'object') {
+        const cloneBody = { ...req.body };
+        delete cloneBody.url;
+        if (Object.keys(cloneBody).length > 0) {
+          fetchHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
+          fetchInit.body = new URLSearchParams(
+            Object.entries(cloneBody).map(([k, v]) => [k, String(v ?? '')])
+          ).toString();
+        }
+      }
+
+      const response = await fetch(targetUrl, fetchInit);
+      if (timeout) clearTimeout(timeout);
+
+      const finalUrl = cleanTrackingParameters(response.url || targetUrl);
       const contentType = response.headers.get('content-type') || 'text/html';
 
       // Remove restrictive framing and security headers
@@ -293,6 +334,13 @@ async function startServer() {
           `);
         }
 
+        // 0. Strip ad/tracker scripts, tracking pixels, and ad iframes server-side
+        const strippedResult = stripTrackingFromHtml(html);
+        html = strippedResult.html;
+        if (strippedResult.blockedCount > 0) {
+          res.setHeader('X-Omarvio-Trackers-Stripped', String(strippedResult.blockedCount));
+        }
+
         // 1. Remove restrictive meta tags and prevent automatic refresh/redirect traps
         html = html.replace(
           /<meta[^>]+http-equiv=["']?(content-security-policy|x-frame-options|refresh)["']?[^>]*>/gi,
@@ -307,7 +355,7 @@ async function startServer() {
           html = `${baseTag}${html}`;
         }
 
-        // 3. Inject anti-frame-busting, popup neutralization, and navigation interceptor script
+        // 3. Inject anti-frame-busting, popup neutralization, aggressive ad-block CSS, and video ad skipper
         const interceptor = `
           <style>
             html {
@@ -315,18 +363,9 @@ async function startServer() {
               touch-action: pan-x pan-y pinch-zoom !important;
               overscroll-behavior-y: contain !important;
             }
-            .ytp-ad-module, .ytp-ad-player-overlay, .ytp-ad-text, .video-ads, .ad-container, .ad-interrupting,
-            div[id*="google_ads"], div[class*="ad-box"], div[class*="sponsor"], iframe[src*="doubleclick"],
-            iframe[src*="adservice"], .fb-ad, .sponsored_ad, .ad-banner, .interstitial-ad, .overlay-ad,
-            div[class*="popup-banner"], div[id*="cookie-banner"], div[class*="consent-modal"] {
-              display: none !important;
-              visibility: hidden !important;
-              height: 0 !important;
-              width: 0 !important;
-              opacity: 0 !important;
-              pointer-events: none !important;
-            }
+            ${AD_SUPPRESSION_CSS}
           </style>
+          <script>${AD_FAST_SKIP_SCRIPT}</script>
           <script>
             (function() {
               var speculativeUrl = null;
@@ -592,6 +631,7 @@ async function startServer() {
         return res.send(buffer);
       }
     } catch (err: any) {
+      if (timeout) clearTimeout(timeout);
       console.warn(`Proxy warning for ${targetUrl}:`, err.message);
       // Return a clean, native Omarvio styled error recovery page in HTML
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -634,17 +674,29 @@ async function startServer() {
   // ROUTE 2: IN-APP STREAM & FILE DOWNLOAD PROXY
   // =========================================================================
   app.get('/api/proxy-download', async (req, res) => {
-    const targetUrl = req.query.url as string;
+    let targetUrl = (req.query.url as string) || '';
     const filename = (req.query.filename as string) || 'download';
     if (!targetUrl) return res.status(400).send('Missing url parameter');
+    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+      targetUrl = `https://${targetUrl}`;
+    }
+    if (isSSRFBlocked(targetUrl)) {
+      return res.status(403).send('Blocked by Omarvio Security');
+    }
 
     try {
-      const response = await fetch(targetUrl, {
+      const controller = new AbortController();
+      const dlTimeout = setTimeout(() => controller.abort(), 20000);
+      const response = await fetch(cleanTrackingParameters(targetUrl), {
+        signal: controller.signal,
         headers: {
           'User-Agent':
-            'Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 OMARVIO/2.0',
+            'Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 OMARVIO/2.0',
+          'DNT': '1',
+          'Sec-GPC': '1',
         },
       });
+      clearTimeout(dlTimeout);
 
       const contentType = response.headers.get('content-type') || 'application/octet-stream';
       res.setHeader('Content-Type', contentType);
@@ -654,7 +706,7 @@ async function startServer() {
       const arrayBuffer = await response.arrayBuffer();
       return res.send(Buffer.from(arrayBuffer));
     } catch (err: any) {
-      return res.status(500).send(`Download failed: ${err.message}`);
+      return res.status(502).send(`Download failed: ${err.message}`);
     }
   });
 

@@ -14,6 +14,9 @@ export interface OmarvioAndroidBridge {
   openIncognitoHome?: () => void;
   setSearchEngine?: (engineId: string) => void;
   setDesktopMode?: (enabled: boolean) => void;
+  setAdBlockEnabled?: (enabled: boolean) => void;
+  setBlockThirdPartyCookies?: (blocked: boolean) => void;
+  openNativeSettings?: () => void;
   clearAllData?: () => void;
   getAppVersion?: () => string;
   getBlockedCount?: () => number;
@@ -105,6 +108,31 @@ export function syncDesktopModeWithAndroid(enabled: boolean): void {
   try {
     window.OmarvioAndroid?.setDesktopMode?.(enabled);
   } catch {}
+}
+
+export function syncAdBlockWithAndroid(enabled: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.OmarvioAndroid?.setAdBlockEnabled?.(enabled);
+  } catch {}
+}
+
+export function syncThirdPartyCookieBlockWithAndroid(blocked: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.OmarvioAndroid?.setBlockThirdPartyCookies?.(blocked);
+  } catch {}
+}
+
+export function openNativeAndroidSettings(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    if (typeof window.OmarvioAndroid?.openNativeSettings === 'function') {
+      window.OmarvioAndroid.openNativeSettings();
+      return true;
+    }
+  } catch {}
+  return false;
 }
 
 export function clearNativeAndroidBrowsingData(): void {

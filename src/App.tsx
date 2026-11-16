@@ -320,12 +320,130 @@ export default function App() {
     triggerToast('🕵️ New Incognito Tab Opened (Zero traces recorded)');
   };
 
-  const handleAddTabToGroup = () => {
-    const groupName = 'Group 1';
+  const GROUP_COLORS = ['cyan', 'emerald', 'amber', 'violet', 'rose'];
+
+  const getNextGroupMeta = (currentTabs: Tab[], preferredName?: string) => {
+    const existingIds = new Set<string>();
+    currentTabs.forEach((t) => {
+      if (t.groupId) existingIds.add(t.groupId);
+    });
+    const nextNumber = existingIds.size + 1;
+    const groupId = `group-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+    const groupName = (preferredName || '').trim() || `Group ${nextNumber}`;
+    const groupColor = GROUP_COLORS[existingIds.size % GROUP_COLORS.length];
+    return { groupId, groupName, groupColor };
+  };
+
+  const handleAddTabToGroup = (targetTabId?: string, preferredName?: string) => {
+    const idToGroup = targetTabId || activeTabId;
+    let createdGroupName = '';
+    setTabs((prev) => {
+      const { groupId, groupName, groupColor } = getNextGroupMeta(prev, preferredName);
+      createdGroupName = groupName;
+      return prev.map((t) =>
+        t.id === idToGroup ? { ...t, groupId, groupName, groupColor } : t
+      );
+    });
+    triggerToast(`⊞ Added tab to ${createdGroupName || 'New Group'}`);
+  };
+
+  const handleGroupTabs = (sourceTabId: string, targetTabId: string) => {
+    if (!sourceTabId || !targetTabId || sourceTabId === targetTabId) return;
+    setTabs((prev) => {
+      const targetTab = prev.find((t) => t.id === targetTabId);
+      if (!targetTab) return prev;
+      if (targetTab.groupId) {
+        return prev.map((t) =>
+          t.id === sourceTabId
+            ? {
+                ...t,
+                groupId: targetTab.groupId,
+                groupName: targetTab.groupName || 'Tab Group',
+                groupColor: targetTab.groupColor || 'cyan',
+              }
+            : t
+        );
+      }
+      const { groupId, groupName, groupColor } = getNextGroupMeta(prev);
+      return prev.map((t) =>
+        t.id === sourceTabId || t.id === targetTabId
+          ? { ...t, groupId, groupName, groupColor }
+          : t
+      );
+    });
+    triggerToast('⊞ Tabs grouped together');
+  };
+
+  const handleAssignTabToGroup = (
+    tabId: string,
+    groupId: string,
+    groupName: string,
+    groupColor = 'cyan'
+  ) => {
     setTabs((prev) =>
-      prev.map((t) => (t.id === activeTabId ? { ...t, groupId: 'group-1', groupName } : t))
+      prev.map((t) =>
+        t.id === tabId ? { ...t, groupId, groupName, groupColor } : t
+      )
     );
-    triggerToast(`⊞ Tab added to ${groupName}`);
+    triggerToast(`⊞ Moved tab to ${groupName}`);
+  };
+
+  const handleRemoveTabFromGroup = (tabId: string) => {
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === tabId
+          ? { ...t, groupId: undefined, groupName: undefined, groupColor: undefined }
+          : t
+      )
+    );
+    triggerToast('Tab removed from group');
+  };
+
+  const handleRenameGroup = (groupId: string, newName: string) => {
+    const clean = newName.trim();
+    if (!clean) return;
+    setTabs((prev) =>
+      prev.map((t) => (t.groupId === groupId ? { ...t, groupName: clean } : t))
+    );
+  };
+
+  const handleCloseGroup = (groupId: string) => {
+    setTabs((prev) => {
+      const remaining = prev.filter((t) => t.groupId !== groupId);
+      if (remaining.length === 0) {
+        const freshTab = createDefaultTab();
+        setActiveTabId(freshTab.id);
+        return [freshTab];
+      }
+      if (!remaining.some((t) => t.id === activeTabId)) {
+        setActiveTabId(remaining[remaining.length - 1].id);
+      }
+      return remaining;
+    });
+    triggerToast('Tab group closed');
+  };
+
+  const handleNewTabInGroup = (groupId: string, groupName: string, groupColor = 'cyan') => {
+    const newTab = createDefaultTab();
+    newTab.groupId = groupId;
+    newTab.groupName = groupName;
+    newTab.groupColor = groupColor;
+    setTabs((prev) => [...prev, newTab]);
+    setActiveTabId(newTab.id);
+  };
+
+  const handleDuplicateTab = (tabId: string) => {
+    const source = tabs.find((t) => t.id === tabId);
+    if (!source) return;
+    const copy: Tab = {
+      ...source,
+      id: `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      createdAt: Date.now(),
+      isLoading: Boolean(source.url),
+    };
+    setTabs((prev) => [...prev, copy]);
+    setActiveTabId(copy.id);
+    triggerToast('❐ Tab duplicated');
   };
 
   const handleToggleBookmark = () => {
@@ -987,7 +1105,7 @@ export default function App() {
         />
       ) : null}
 
-      {/* Mobile Tab Switcher Modal (2-Column Grid matching Screenshot) */}
+      {/* Mobile Tab Switcher Modal (2-Column Grid with Visual Tab Groups & Drag-and-Drop) */}
       <TabSwitcherModal
         isOpen={isTabSwitcherOpen}
         tabs={tabs}
@@ -998,6 +1116,14 @@ export default function App() {
         onCloseModal={() => setIsTabSwitcherOpen(false)}
         onCloseAllTabs={handleCloseAllTabs}
         onNewIncognitoTab={handleNewIncognitoTab}
+        onGroupTabs={handleGroupTabs}
+        onAddTabToNewGroup={handleAddTabToGroup}
+        onAssignTabToGroup={handleAssignTabToGroup}
+        onRemoveTabFromGroup={handleRemoveTabFromGroup}
+        onRenameGroup={handleRenameGroup}
+        onCloseGroup={handleCloseGroup}
+        onNewTabInGroup={handleNewTabInGroup}
+        onDuplicateTab={handleDuplicateTab}
       />
 
       {/* Chrome Android Authentic 3-Dot Overflow Menu Dropdown */}

@@ -21,6 +21,7 @@ export interface Tab {
   isBookmarked?: boolean;
   groupId?: string;
   groupName?: string;
+  groupColor?: string;
 }
 
 export interface SearchEngine {
