@@ -16,6 +16,7 @@ export interface Tab {
   isSecure: boolean;
   createdAt: number;
   isDesktopMode?: boolean;
+  isReadingMode?: boolean;
   isIncognito?: boolean;
   isBookmarked?: boolean;
   groupId?: string;

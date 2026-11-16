@@ -23,16 +23,19 @@ import { downloadFileInApp } from '../engine/inAppDownloader';
 import { attachPassiveLinkInterceptor } from '../engine/linkInterceptor';
 import { enablePersistentStorage } from '../engine/swRegister';
 import { putTabToSleep, wakeSleepingTab } from '../engine/tabManager';
+import { extractReadableArticleFromDocument } from '../engine/readerExtractor';
 
 interface BrowserFrameProps {
   url: string;
   tabId: string;
   isDesktopMode?: boolean;
+  isReadingMode?: boolean;
   isActive?: boolean;
   isSleeping?: boolean;
   onLoadStart: () => void;
   onLoadEnd: () => void;
   onUrlChange: (newUrl: string) => void;
+  onToggleReadingMode?: (next?: boolean) => void;
   onToast?: (msg: string) => void;
   onShare?: (title: string, url: string) => void;
 }
@@ -55,11 +58,13 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
   url,
   tabId,
   isDesktopMode = false,
+  isReadingMode = false,
   isActive = true,
   isSleeping = false,
   onLoadStart,
   onLoadEnd,
   onUrlChange,
+  onToggleReadingMode,
   onToast,
   onShare,
 }) => {
@@ -68,6 +73,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
   const [hasError, setHasError] = useState(false);
   const [scale, setScale] = useState(1);
   const [isReaderModeActive, setIsReaderModeActive] = useState(false);
+  const [isReaderLoading, setIsReaderLoading] = useState(false);
   const [readerArticle, setReaderArticle] = useState<{ title: string; url: string; content: string } | null>(null);
 
   // Optimistic navigation state to eliminate blank/white screen flicker
@@ -349,6 +355,70 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
     return () => clearTimeout(timer);
   }, [url, isSearchResultsUrl, getProcessedSrc]);
 
+  // 4b. Reading Mode content extraction (0ms live-DOM extraction + /api/proxy?reader=1 fallback)
+  useEffect(() => {
+    if (!isReadingMode) {
+      setIsReaderLoading(false);
+      return;
+    }
+    if (!url || isSearchResultsUrl || isSleeping) return;
+
+    let cancelled = false;
+    const controller = new AbortController();
+
+    const safeTitle = (() => {
+      try {
+        return new URL(url.startsWith('http') ? url : `https://${url}`).hostname.replace(/^www\./i, '');
+      } catch {
+        return 'Web Article';
+      }
+    })();
+
+    // Attempt 0ms extraction directly from the same-origin proxy iframe document first
+    try {
+      const doc = iframeRef.current?.contentDocument;
+      if (doc && doc.body) {
+        const extracted = extractReadableArticleFromDocument(doc, url);
+        if (extracted && extracted.content.length >= 120) {
+          setReaderArticle(extracted);
+          setIsReaderLoading(false);
+          return () => {
+            cancelled = true;
+            controller.abort();
+          };
+        }
+      }
+    } catch {}
+
+    // Fallback to backend /api/proxy?reader=1 clean article extractor
+    setIsReaderLoading(true);
+    setReaderArticle((prev) =>
+      prev && prev.url === url ? prev : { title: safeTitle, url, content: '' }
+    );
+
+    fetch(`/api/proxy?url=${encodeURIComponent(url)}&reader=1`, { signal: controller.signal })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled) return;
+        if (data && typeof data.content === 'string') {
+          setReaderArticle({
+            title: data.title || safeTitle,
+            url: data.url || url,
+            content: data.content,
+          });
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setIsReaderLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [isReadingMode, url, isSearchResultsUrl, isSleeping]);
+
   /**
    * Milestone 29: WebView Memory Optimization Strategy
    * Clears the back-forward cache (bfcache) when a tab transitions to sleep.
@@ -516,20 +586,22 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
 
 
 
+  const showReaderOverlay = Boolean(!isSleeping && (isReadingMode || (isReaderModeActive && readerArticle)));
+
   return (
     <div
       ref={containerRef}
       className="relative w-full h-full bg-[#070913] flex flex-col overflow-hidden touch-pan-y overscroll-contain select-none"
     >
       {/* Top Nano Glowing Progress Bar during instant transitions */}
-      {isOptimisticNavigating && (
+      {isOptimisticNavigating && !showReaderOverlay && (
         <div className="absolute top-0 left-0 right-0 h-1 z-30 bg-slate-900/60 overflow-hidden">
           <div className="h-full bg-gradient-to-r from-cyan-400 via-blue-500 to-emerald-400 w-full animate-pulse shadow-[0_0_8px_rgba(6,182,212,0.9)]" />
         </div>
       )}
 
       {/* Desktop Mode Indicator Pill */}
-      {isDesktopMode && (
+      {isDesktopMode && !showReaderOverlay && (
         <div className="absolute top-2 right-2 z-20 px-2 py-0.5 rounded-md bg-blue-950/80 border border-blue-400/40 text-[10px] font-bold text-blue-200 pointer-events-none shadow-md flex items-center gap-1 backdrop-blur-xs">
           <span>🖥️</span> Desktop site
         </div>
@@ -565,165 +637,165 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
             <span>ট্যাব সক্রিয় করুন</span>
           </button>
         </div>
-      ) : isReaderModeActive && readerArticle ? (
-        <SmartReaderView
-          title={readerArticle.title}
-          url={readerArticle.url}
-          content={readerArticle.content}
-          onBackToOriginal={() => setIsReaderModeActive(false)}
-          onShare={onShare}
-          onToast={onToast || (() => {})}
-        />
-      ) : isSearchResultsUrl ? (
-        <SearchResultsView
-          query={extractSearchQuery(url)}
-          initialEngine={extractSearchEngine(url)}
-          onNavigate={onUrlChange}
-          onOpenReaderMode={(title, u, content) => {
-            setReaderArticle({ title, url: u, content });
-            setIsReaderModeActive(true);
-          }}
-          onShare={onShare}
-        />
-      ) : hasError ? (
-        /* ========================================================================= */
-        /* 3. CONNECTION RECOVERY CARD (REPLACES DEAD GREY FROWNY PAGE)              */
-        /* ========================================================================= */
-        <div className="flex-1 flex flex-col items-center justify-center p-6 text-center max-w-md mx-auto select-none">
-          <div className="w-14 h-14 rounded-3xl bg-cyan-950/40 border border-cyan-500/40 flex items-center justify-center text-cyan-400 mb-4 shadow-lg shadow-cyan-950/50">
-            <ShieldCheck className="w-7 h-7" />
-          </div>
-          <h3 className="text-lg font-bold text-slate-100 mb-1">
-            ওমারভিও কানেকশন শিল্ড
-          </h3>
-          <p className="text-xs text-slate-400 mb-5 leading-relaxed">
-            এই সাইটটি সরাসরি সংযোগ সীমিত করেছে। ওমারভিও এজ প্রক্সি দিয়ে এটি আনলক করুন অথবা বিজ্ঞাপনমুক্ত ক্লিন রিডার মোডে তাৎক্ষণিকভাবে পড়ুন।
-          </p>
-
-          <div className="w-full flex flex-col gap-2.5 mb-4">
-            <a
-              href={url.startsWith('http') ? url : `https://${url}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md active:scale-95 touch-manipulation"
-            >
-              <Zap className="w-4 h-4" />
-              <span>সরাসরি ব্রাউজারে খুলুন (১০০% কাজ করবে)</span>
-            </a>
-
-            <button
-              type="button"
-              onClick={() => {
-                setHasError(false);
-                setIsOptimisticNavigating(true);
-                onLoadStartRef.current?.();
-                if (iframeRef.current) {
-                  iframeRef.current.src = `/api/proxy?url=${encodeURIComponent(url)}`;
-                }
-              }}
-              className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md active:scale-95 touch-manipulation"
-            >
-              <Zap className="w-4 h-4" />
-              <span>ওমারভিও প্রক্সি দিয়ে আনলক করুন (Bypass X-Frame)</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={async () => {
-                const safeTitle = (() => {
-                  try {
-                    return new URL(url.startsWith('http') ? url : `https://${url}`).hostname;
-                  } catch {
-                    return 'Web Article';
-                  }
-                })();
-                setReaderArticle({
-                  title: safeTitle,
-                  url: url,
-                  content: 'মূল আর্টিকেল ওমারভিও ক্লিন রিডার ইঞ্জিনে লোড হচ্ছে...',
-                });
-                setIsReaderModeActive(true);
-                try {
-                  const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}&reader=1`);
-                  if (res.ok) {
-                    const data = await res.json();
-                    if (data?.content) {
-                      setReaderArticle({
-                        title: data.title || safeTitle,
-                        url: data.url || url,
-                        content: data.content,
-                      });
-                    }
-                  }
-                } catch {}
-              }}
-              className="w-full py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-500/40 text-cyan-200 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md"
-            >
-              <BookOpen className="w-4 h-4 text-cyan-400" />
-              <span>ওমারভিও ক্লিন রিডার মোডে পড়ুন</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setHasError(false);
-                onLoadStartRef.current?.();
-                if (iframeRef.current) iframeRef.current.src = getProcessedSrc(url);
-              }}
-              className="w-full py-2 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>পুনরায় লোড করুন</span>
-            </button>
-          </div>
-        </div>
       ) : (
-        /* ========================================================================= */
-        /* 4. REAL LIVE WEBPAGE / FULL FACEBOOK / WEB VIEWPORT                       */
-        /* ========================================================================= */
-        <div className="relative w-full h-full overflow-hidden bg-[#070913] flex flex-col">
-          {/* Viewport Frame with Dark Underlay to Guarantee Zero White Flash */}
-          <div
-            className="flex-1 w-full h-full relative bg-[#070913] touch-pan-y overscroll-contain"
-            style={{
-              touchAction: 'pan-x pan-y pinch-zoom',
-              WebkitOverflowScrolling: 'touch',
-            }}
-          >
-            <iframe
-              ref={iframeRef}
-              key={tabId}
-              src={activeFrameSrc}
-              title="Omarvio Sandboxed Viewport"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-presentation allow-downloads"
-              allow="fullscreen; autoplay; encrypted-media; picture-in-picture; camera; microphone; clipboard-write"
-              onLoad={handleIframeLoad}
-              onError={handleIframeError}
-              style={
-                isDesktopMode && scale < 1
-                  ? {
-                      width: '1024px',
-                      height: `${100 / scale}%`,
-                      transform: `scale(${scale})`,
-                      transformOrigin: 'top left',
-                      touchAction: 'pan-x pan-y pinch-zoom',
-                      WebkitOverflowScrolling: 'touch',
-                      backgroundColor: '#070913',
-                      colorScheme: 'dark',
-                    }
-                  : {
-                      width: '100%',
-                      height: '100%',
-                      touchAction: 'pan-x pan-y pinch-zoom',
-                      WebkitOverflowScrolling: 'touch',
-                      backgroundColor: '#070913',
-                      colorScheme: 'dark',
-                    }
-              }
-              className="border-none w-full h-full block bg-[#070913]"
+        <>
+          {/* Distraction-Free Smart Reader Mode Overlay */}
+          {showReaderOverlay && (
+            <div className="flex-1 w-full h-full overflow-hidden">
+              <SmartReaderView
+                title={readerArticle?.title || url}
+                url={readerArticle?.url || url}
+                content={readerArticle?.content || ''}
+                isLoading={isReaderLoading}
+                onBackToOriginal={() => {
+                  setIsReaderModeActive(false);
+                  if (isReadingMode) {
+                    onToggleReadingMode?.(false);
+                  }
+                }}
+                onShare={onShare}
+                onToast={onToast || (() => {})}
+              />
+            </div>
+          )}
+
+          {/* Search Results or Error Recovery Views (shown when not in Reader Mode) */}
+          {!showReaderOverlay && isSearchResultsUrl && (
+            <SearchResultsView
+              query={extractSearchQuery(url)}
+              initialEngine={extractSearchEngine(url)}
+              onNavigate={onUrlChange}
+              onOpenReaderMode={(title, u, content) => {
+                setReaderArticle({ title, url: u, content });
+                setIsReaderModeActive(true);
+              }}
+              onShare={onShare}
             />
-          </div>
-        </div>
+          )}
+
+          {!showReaderOverlay && !isSearchResultsUrl && hasError && (
+            /* ========================================================================= */
+            /* 3. CONNECTION RECOVERY CARD (REPLACES DEAD GREY FROWNY PAGE)              */
+            /* ========================================================================= */
+            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center max-w-md mx-auto select-none">
+              <div className="w-14 h-14 rounded-3xl bg-cyan-950/40 border border-cyan-500/40 flex items-center justify-center text-cyan-400 mb-4 shadow-lg shadow-cyan-950/50">
+                <ShieldCheck className="w-7 h-7" />
+              </div>
+              <h3 className="text-lg font-bold text-slate-100 mb-1">
+                ওমারভিও কানেকশন শিল্ড
+              </h3>
+              <p className="text-xs text-slate-400 mb-5 leading-relaxed">
+                এই সাইটটি সরাসরি সংযোগ সীমিত করেছে। ওমারভিও এজ প্রক্সি দিয়ে এটি আনলক করুন অথবা বিজ্ঞাপনমুক্ত ক্লিন রিডার মোডে তাৎক্ষণিকভাবে পড়ুন।
+              </p>
+
+              <div className="w-full flex flex-col gap-2.5 mb-4">
+                <a
+                  href={url.startsWith('http') ? url : `https://${url}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md active:scale-95 touch-manipulation"
+                >
+                  <Zap className="w-4 h-4" />
+                  <span>সরাসরি ব্রাউজারে খুলুন (১০০% কাজ করবে)</span>
+                </a>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHasError(false);
+                    setIsOptimisticNavigating(true);
+                    onLoadStartRef.current?.();
+                    if (iframeRef.current) {
+                      iframeRef.current.src = `/api/proxy?url=${encodeURIComponent(url)}`;
+                    }
+                  }}
+                  className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md active:scale-95 touch-manipulation"
+                >
+                  <Zap className="w-4 h-4" />
+                  <span>ওমারভিও প্রক্সি দিয়ে আনলক করুন (Bypass X-Frame)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onToggleReadingMode) {
+                      onToggleReadingMode(true);
+                    } else {
+                      setIsReaderModeActive(true);
+                    }
+                  }}
+                  className="w-full py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-500/40 text-cyan-200 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md"
+                >
+                  <BookOpen className="w-4 h-4 text-cyan-400" />
+                  <span>ওমারভিও ক্লিন রিডার মোডে পড়ুন</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHasError(false);
+                    onLoadStartRef.current?.();
+                    if (iframeRef.current) iframeRef.current.src = getProcessedSrc(url);
+                  }}
+                  className="w-full py-2 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>পুনরায় লোড করুন</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Live Webpage Iframe kept mounted cleanly so toggling Reading Mode back is instant */}
+          {!isSearchResultsUrl && !hasError && (
+            <div
+              className={`relative w-full h-full overflow-hidden bg-[#070913] flex-col ${
+                showReaderOverlay ? 'hidden' : 'flex'
+              }`}
+            >
+              <div
+                className="flex-1 w-full h-full relative bg-[#070913] touch-pan-y overscroll-contain"
+                style={{
+                  touchAction: 'pan-x pan-y pinch-zoom',
+                  WebkitOverflowScrolling: 'touch',
+                }}
+              >
+                <iframe
+                  ref={iframeRef}
+                  key={tabId}
+                  src={activeFrameSrc}
+                  title="Omarvio Sandboxed Viewport"
+                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-presentation allow-downloads"
+                  allow="fullscreen; autoplay; encrypted-media; picture-in-picture; camera; microphone; clipboard-write"
+                  onLoad={handleIframeLoad}
+                  onError={handleIframeError}
+                  style={
+                    isDesktopMode && scale < 1
+                      ? {
+                          width: '1024px',
+                          height: `${100 / scale}%`,
+                          transform: `scale(${scale})`,
+                          transformOrigin: 'top left',
+                          touchAction: 'pan-x pan-y pinch-zoom',
+                          WebkitOverflowScrolling: 'touch',
+                          backgroundColor: '#070913',
+                          colorScheme: 'dark',
+                        }
+                      : {
+                          width: '100%',
+                          height: '100%',
+                          touchAction: 'pan-x pan-y pinch-zoom',
+                          WebkitOverflowScrolling: 'touch',
+                          backgroundColor: '#070913',
+                          colorScheme: 'dark',
+                        }
+                  }
+                  className="border-none w-full h-full block bg-[#070913]"
+                />
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

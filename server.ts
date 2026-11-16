@@ -14,6 +14,7 @@ import { Readable } from 'stream';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { executeGatewaySearch, fetchSearchSuggestions } from './src/engine/search/searchGateway';
+import { extractReadableArticleFromHtml } from './src/engine/readerExtractor';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -78,7 +79,15 @@ function getPort(): number {
     const val = parseInt(process.argv[portIdx + 1], 10);
     if (!isNaN(val)) return val;
   }
-  return parseInt(process.env.PORT || '3000', 10);
+  if (process.env.DEFAULT_APP_PORT) {
+    const val = parseInt(process.env.DEFAULT_APP_PORT, 10);
+    if (!isNaN(val)) return val;
+  }
+  if (process.env.PORT && process.env.PORT !== process.env.NGINX_PORT) {
+    const val = parseInt(process.env.PORT, 10);
+    if (!isNaN(val)) return val;
+  }
+  return 3000;
 }
 
 function getHost(): string {
@@ -234,6 +243,13 @@ async function startServer() {
 
       if (contentType.includes('text/html') || contentType.includes('application/xhtml+xml')) {
         let html = await response.text();
+
+        // Reader Mode JSON extraction (?reader=1): strips sidebars, ads, nav, and footers
+        if (req.query.reader === '1') {
+          const extracted = extractReadableArticleFromHtml(html, finalUrl);
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          return res.status(200).json(extracted);
+        }
 
         // Detect strict bot-protection / Cloudflare / WAF blocks (403/401/429/503) so user never hits a broken error
         const isBotChallenge =

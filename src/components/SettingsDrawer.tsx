@@ -55,6 +55,13 @@ import {
   unwrapAndSanitizeExternalUrl,
   CleanedExternalLinkResult,
 } from '../engine/linkInterceptor';
+import {
+  SavedBookmark,
+  getBookmarks,
+  saveBookmarks,
+  deleteBookmarkById,
+  subscribeBookmarks,
+} from '../engine/bookmarks';
 
 export type SettingsTabId =
   | 'general'
@@ -66,14 +73,6 @@ export type SettingsTabId =
   | 'feedback'
   | 'display'
   | 'about';
-
-interface SavedBookmark {
-  id: string;
-  title: string;
-  url: string;
-  encrypted: boolean;
-  timestamp: number;
-}
 
 export interface AIModelOption {
   id: string;
@@ -349,36 +348,13 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   const [feedbackContact, setFeedbackContact] = useState('');
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
 
-  // Bookmarks Vault (Persisted in Local Storage)
-  const [bookmarks, setBookmarks] = useState<SavedBookmark[]>(() => {
-    try {
-      const saved = localStorage.getItem('omarvio_bookmarks');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return [
-      {
-        id: 'bm-1',
-        title: 'YouTube (Ad-Free Isolation)',
-        url: 'https://youtube.com',
-        encrypted: true,
-        timestamp: Date.now() - 3600000,
-      },
-      {
-        id: 'bm-2',
-        title: 'Wikipedia (The Free Encyclopedia)',
-        url: 'https://wikipedia.org',
-        encrypted: true,
-        timestamp: Date.now() - 7200000,
-      },
-      {
-        id: 'bm-3',
-        title: 'BBC News Global',
-        url: 'https://bbc.com/news',
-        encrypted: true,
-        timestamp: Date.now() - 86400000,
-      },
-    ];
-  });
+  // Bookmarks Vault (Persisted & Synced across Home + Vault)
+  const [bookmarks, setBookmarks] = useState<SavedBookmark[]>(() => getBookmarks());
+
+  useEffect(() => {
+    setBookmarks(getBookmarks());
+    return subscribeBookmarks(setBookmarks);
+  }, []);
 
   // Default Browser & Simulator States
   const [defaultStepTab, setDefaultStepTab] = useState<'samsung' | 'xiaomi' | 'pixel' | 'ios' | 'pc'>('samsung');
@@ -463,24 +439,13 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
       encrypted: true,
       timestamp: Date.now(),
     };
-    setBookmarks((prev) => {
-      const updated = [newBm, ...prev];
-      try {
-        localStorage.setItem('omarvio_bookmarks', JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
+    const updated = saveBookmarks([newBm, ...bookmarks]);
+    setBookmarks(updated);
     onToast('🔐 পেজটি AES-256 এনক্রিপ্টেড ভল্টে সেভ করা হয়েছে!');
   };
 
   const handleDeleteBookmark = (id: string) => {
-    setBookmarks((prev) => {
-      const updated = prev.filter((b) => b.id !== id);
-      try {
-        localStorage.setItem('omarvio_bookmarks', JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
+    setBookmarks(deleteBookmarkById(id));
     onToast('🗑️ বুকমার্ক মুছে ফেলা হয়েছে');
   };
 
@@ -521,7 +486,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
     }
     const res = await restoreEncryptedVaultBackup(restoreCipherInput.trim(), e2eePassphrase);
     if (res.success && Array.isArray(res.data)) {
-      setBookmarks(res.data);
+      setBookmarks(saveBookmarks(res.data));
       setRestoreCipherInput('');
       onToast('✅ ভল্ট সফলভাবে ডিক্রিপ্ট এবং রিস্টোর সম্পন্ন হয়েছে!');
     } else {

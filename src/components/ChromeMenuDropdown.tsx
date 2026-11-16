@@ -41,6 +41,7 @@ interface ChromeMenuDropdownProps {
   canGoForward: boolean;
   isBookmarked: boolean;
   isDesktopMode: boolean;
+  isReadingMode?: boolean;
   onGoBack: () => void;
   onGoForward: () => void;
   onToggleBookmark: () => void;
@@ -75,6 +76,7 @@ export const ChromeMenuDropdown: React.FC<ChromeMenuDropdownProps> = ({
   canGoForward,
   isBookmarked,
   isDesktopMode,
+  isReadingMode = false,
   onGoBack,
   onGoForward,
   onToggleBookmark,
@@ -325,14 +327,33 @@ export const ChromeMenuDropdown: React.FC<ChromeMenuDropdownProps> = ({
                 <span className="text-[#e3e3e3] font-normal">Translate...</span>
               </button>
 
-              {/* Show Reading mode */}
+              {/* Show / Exit Reading mode */}
               <button
                 type="button"
                 onClick={() => handleAction(onToggleReadingMode)}
-                className="w-full flex items-center gap-3.5 px-4 py-3 hover:bg-[#35363a] active:bg-[#3c4043] text-left text-sm transition-colors cursor-pointer"
+                className="w-full flex items-center justify-between px-4 py-3 hover:bg-[#35363a] active:bg-[#3c4043] text-left text-sm transition-colors cursor-pointer"
               >
-                <BookOpen className="w-5 h-5 text-[#c4c7c5] shrink-0" />
-                <span className="text-[#e3e3e3] font-normal">Show Reading mode</span>
+                <div className="flex items-center gap-3.5">
+                  <BookOpen
+                    className={`w-5 h-5 shrink-0 ${
+                      isReadingMode ? 'text-cyan-400' : 'text-[#c4c7c5]'
+                    }`}
+                  />
+                  <span className={isReadingMode ? 'text-cyan-300 font-medium' : 'text-[#e3e3e3] font-normal'}>
+                    {isReadingMode ? 'Exit Reading mode' : 'Show Reading mode'}
+                  </span>
+                </div>
+                <div className="text-cyan-400">
+                  {isReadingMode ? (
+                    <div className="w-5 h-5 rounded bg-cyan-500 border border-cyan-400 flex items-center justify-center text-slate-950 font-bold shadow-sm">
+                      <svg className="w-3.5 h-3.5 stroke-current stroke-2 fill-none" viewBox="0 0 24 24">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    </div>
+                  ) : (
+                    <div className="w-5 h-5 rounded border-2 border-[#8e918f] bg-transparent" />
+                  )}
+                </div>
               </button>
 
               {/* Install and create shortcut */}

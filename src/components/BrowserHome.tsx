@@ -28,9 +28,22 @@ import {
   ChevronDown,
   Download,
   ArrowRight,
+  TrendingUp,
+  Bookmark,
+  ArrowUpLeft,
+  RefreshCw,
+  Globe,
+  Trash2,
 } from 'lucide-react';
 import { getSanitizedSearchUrl } from '../engine/adblocker';
 import { isAndroidNativeShell, syncSearchEngineWithAndroid } from '../engine/nativeBridge';
+import { getLanguage, subscribeLanguage, LanguageCode } from '../engine/i18n';
+import {
+  SavedBookmark,
+  getBookmarks,
+  deleteBookmarkById,
+  subscribeBookmarks,
+} from '../engine/bookmarks';
 import {
   SearchEngineSelectorModal,
   SEARCH_ENGINES,
@@ -42,6 +55,7 @@ interface BrowserHomeProps {
   onOpenSearchSuggestions?: (initialText?: string) => void;
   onOpenIncognitoTab?: () => void;
   onOpenAIMode?: () => void;
+  onOpenBookmarks?: () => void;
 }
 
 export interface CustomShortcut {
@@ -189,16 +203,117 @@ const renderShortcutIcon = (item: CustomShortcut) => {
   return <span>{item.letter}</span>;
 };
 
+interface TrendingQueryItem {
+  id: string;
+  query: string;
+  topicBn: string;
+  topicEn: string;
+}
+
+const TRENDING_QUERY_SETS: TrendingQueryItem[][] = [
+  [
+    {
+      id: 'tr-1',
+      query: 'Bangladesh cricket live score today',
+      topicBn: 'খেলাধুলা · লাইভ',
+      topicEn: 'Sports · Live',
+    },
+    {
+      id: 'tr-2',
+      query: 'প্রথম আলো আজকের সর্বশেষ খবর',
+      topicBn: 'বাংলাদেশ · সংবাদ',
+      topicEn: 'Bangladesh · News',
+    },
+    {
+      id: 'tr-3',
+      query: 'AI privacy browser features 2026',
+      topicBn: 'প্রযুক্তি · এআই',
+      topicEn: 'Tech · AI',
+    },
+    {
+      id: 'tr-4',
+      query: 'Dhaka weather forecast today',
+      topicBn: 'আবহাওয়া · ঢাকা',
+      topicEn: 'Weather · Dhaka',
+    },
+  ],
+  [
+    {
+      id: 'tr-5',
+      query: 'বিসিএস ও সরকারি চাকরির খবর',
+      topicBn: 'ক্যারিয়ার · আপডেট',
+      topicEn: 'Careers · Updates',
+    },
+    {
+      id: 'tr-6',
+      query: 'USD to BDT exchange rate today',
+      topicBn: 'অর্থনীতি · রেট',
+      topicEn: 'Finance · Exchange',
+    },
+    {
+      id: 'tr-7',
+      query: 'Open source Android privacy apps',
+      topicBn: 'ওপেন সোর্স · নিরাপত্তা',
+      topicEn: 'Open Source · Security',
+    },
+    {
+      id: 'tr-8',
+      query: 'বাংলাদেশ প্রযুক্তি ও স্টার্টআপ সংবাদ',
+      topicBn: 'উদ্ভাবন · বাংলাদেশ',
+      topicEn: 'Innovation · BD',
+    },
+  ],
+];
+
+function extractBookmarkHost(url: string): string {
+  try {
+    return new URL(url.startsWith('http') ? url : `https://${url}`).hostname.replace(/^www\./i, '');
+  } catch {
+    return url;
+  }
+}
+
+function formatBookmarkRelativeTime(timestamp: number, isBn: boolean): string {
+  const diffMin = Math.max(1, Math.floor((Date.now() - timestamp) / 60000));
+  if (diffMin < 60) {
+    return isBn ? `${diffMin} মিনিট আগে` : `${diffMin}m ago`;
+  }
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) {
+    return isBn ? `${diffHours} ঘণ্টা আগে` : `${diffHours}h ago`;
+  }
+  const diffDays = Math.floor(diffHours / 24);
+  return isBn ? `${diffDays} দিন আগে` : `${diffDays}d ago`;
+}
+
 export const BrowserHome: React.FC<BrowserHomeProps> = ({
   onNavigate,
   onOpenLens,
   onOpenIncognitoTab,
   onOpenAIMode,
+  onOpenBookmarks,
 }) => {
   const [homeQuery, setHomeQuery] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [speechFeedback, setSpeechFeedback] = useState<string | null>(null);
   const recognitionRef = useRef<any>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Trending Searches & Recent Bookmarks State
+  const [activeDiscoveryTab, setActiveDiscoveryTab] = useState<'trending' | 'bookmarks'>('trending');
+  const [trendingSetIndex, setTrendingSetIndex] = useState(0);
+  const [recentBookmarks, setRecentBookmarks] = useState<SavedBookmark[]>(() => getBookmarks());
+  const [lang, setLang] = useState<LanguageCode>(getLanguage);
+
+  useEffect(() => {
+    setRecentBookmarks(getBookmarks());
+    const unsubBookmarks = subscribeBookmarks(setRecentBookmarks);
+    const unsubLang = subscribeLanguage(setLang);
+    return () => {
+      unsubBookmarks();
+      unsubLang();
+    };
+  }, []);
 
   // Search Engine Selector State
   const [isEngineModalOpen, setIsEngineModalOpen] = useState(false);
@@ -404,16 +519,20 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
     }
   };
 
+  const activeTrendingQueries = TRENDING_QUERY_SETS[trendingSetIndex % TRENDING_QUERY_SETS.length];
+  const visibleBookmarks = recentBookmarks.slice(0, 4);
+  const isBn = lang === 'bn';
+
   return (
     <div className="w-full h-full overflow-y-auto bg-gradient-to-b from-[#0b1021] via-[#080d1a] to-[#04060d] text-white scrollbar-none touch-manipulation">
-      <div className="relative w-full min-h-full flex flex-col items-center justify-start px-4 pt-7 sm:pt-12 pb-20 max-w-lg mx-auto">
+      <div className="relative w-full min-h-full flex flex-col items-center justify-start px-4 pt-6 sm:pt-10 pb-20 max-w-lg md:max-w-3xl mx-auto">
         {/* Glow ambient background sphere */}
         <div className="absolute top-10 left-1/2 -translate-x-1/2 w-72 h-72 bg-blue-600/10 rounded-full blur-3xl pointer-events-none -z-0" />
 
         {/* ============================================================== */}
         {/* 1. CLEAN SLEEK BRANDING                                        */}
         {/* ============================================================== */}
-        <div className="flex flex-col items-center mb-6 relative z-10 text-center select-none">
+        <div className="flex flex-col items-center mb-6 relative z-10 text-center select-none max-w-lg w-full">
           <img
             src="/assets/omarvio-logo-256.webp"
             alt="OMARVIO BROWSER Logo"
@@ -434,7 +553,7 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
         {/* ============================================================== */}
         <form
           onSubmit={handleSearchSubmit}
-          className="w-full h-13 sm:h-14 rounded-full bg-white text-slate-800 px-3.5 py-2 flex items-center justify-between shadow-2xl hover:shadow-cyan-500/20 transition-all relative z-10 mb-3 touch-manipulation border border-slate-200"
+          className="w-full max-w-lg h-13 sm:h-14 rounded-full bg-white text-slate-800 px-3.5 py-2 flex items-center justify-between shadow-2xl hover:shadow-cyan-500/20 transition-all relative z-10 mb-3 touch-manipulation border border-slate-200"
         >
           {/* Left: Interactive Engine Picker Button */}
           <button
@@ -453,6 +572,7 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
           {/* Search Input */}
           <div className="flex-1 min-w-0 pr-1">
             <input
+              ref={searchInputRef}
               type="text"
               value={homeQuery}
               onChange={(e) => setHomeQuery(e.target.value)}
@@ -519,25 +639,25 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
         )}
 
         {/* ============================================================== */}
-        {/* 3. TWO PILL BUTTONS: [ ✦ AI Mode ] & [ 🕵 Incognito ]           */}
+        {/* 3. TWO ACTION BUTTONS: [ ✦ AI Mode ] & [ 🕵 Incognito ]        */}
         {/* ============================================================== */}
-        <div className="w-full flex items-center justify-center gap-2.5 mb-6 relative z-10">
+        <div className="w-full max-w-lg flex items-center justify-center gap-2.5 mb-6 relative z-10">
           <button
             type="button"
             onClick={onOpenAIMode}
-            className="flex-1 py-2 px-3 rounded-full bg-slate-900/90 hover:bg-slate-800 text-slate-200 hover:text-white active:scale-97 transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer border border-slate-700/60"
+            className="flex-1 min-h-[44px] py-2 px-3 rounded-full bg-slate-900/90 hover:bg-slate-800 text-slate-200 hover:text-white active:scale-97 transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer border border-slate-700/60"
           >
             <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="text-xs font-semibold">AI Mode</span>
+            <span className="text-xs font-semibold whitespace-nowrap">AI Mode</span>
           </button>
 
           <button
             type="button"
             onClick={() => onOpenIncognitoTab?.()}
-            className="flex-1 py-2 px-3 rounded-full bg-slate-900/90 hover:bg-slate-800 text-slate-200 hover:text-white active:scale-97 transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer border border-slate-700/60"
+            className="flex-1 min-h-[44px] py-2 px-3 rounded-full bg-slate-900/90 hover:bg-slate-800 text-slate-200 hover:text-white active:scale-97 transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer border border-slate-700/60"
           >
             <Ghost className="w-3.5 h-3.5 text-slate-300" />
-            <span className="text-xs font-semibold">Incognito</span>
+            <span className="text-xs font-semibold whitespace-nowrap">Incognito</span>
           </button>
         </div>
 
@@ -607,6 +727,189 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
             </div>
           </div>
         </div>
+
+        {/* ============================================================== */}
+        {/* 4B. TRENDING SEARCH QUERIES & RECENT BOOKMARKS                 */}
+        {/* ============================================================== */}
+        <section className="w-full mb-6 relative z-10" aria-label="Trending Searches and Recent Bookmarks">
+          {/* Mobile Segmented Switcher (<md) */}
+          <div className="flex md:hidden items-center gap-1 p-1 mb-3 bg-slate-900/90 border border-slate-800 rounded-xl">
+            <button
+              type="button"
+              onClick={() => setActiveDiscoveryTab('trending')}
+              className={`flex-1 min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                activeDiscoveryTab === 'trending'
+                  ? 'bg-[#1b2234] text-cyan-300 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <TrendingUp className="w-3.5 h-3.5 shrink-0" />
+              <span>{isBn ? 'ট্রেন্ডিং সার্চ' : 'Trending'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveDiscoveryTab('bookmarks')}
+              className={`flex-1 min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                activeDiscoveryTab === 'bookmarks'
+                  ? 'bg-[#1b2234] text-cyan-300 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Bookmark className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                {isBn ? 'বুকমার্ক' : 'Bookmarks'} ({recentBookmarks.length})
+              </span>
+            </button>
+          </div>
+
+          {/* Responsive Grid: Segmented single-view on mobile, 2-column split on md+ desktop */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Panel 1: Trending Search Queries */}
+            <div
+              className={`rounded-2xl bg-slate-900/65 border border-slate-800/90 overflow-hidden ${
+                activeDiscoveryTab === 'trending' ? 'block' : 'hidden md:block'
+              }`}
+            >
+              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/80">
+                <div className="flex items-center gap-2 min-w-0">
+                  <TrendingUp className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <h2 className="text-xs font-bold text-slate-200 tracking-wide truncate">
+                    {isBn ? 'ট্রেন্ডিং সার্চ কুয়েরি' : 'Trending Search Queries'}
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setTrendingSetIndex((prev) => prev + 1)}
+                  title={isBn ? 'নতুন ট্রেন্ডিং দেখুন' : 'Refresh trending queries'}
+                  className="min-h-[36px] px-2.5 py-1 rounded-lg text-[11px] font-medium text-cyan-400 hover:text-cyan-300 hover:bg-slate-800/80 transition-colors flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>{isBn ? 'রিফ্রেশ' : 'Refresh'}</span>
+                </button>
+              </div>
+
+              <div className="divide-y divide-slate-800/70">
+                {activeTrendingQueries.map((item, idx) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center justify-between hover:bg-slate-800/45 transition-colors"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => onNavigate(getSanitizedSearchUrl(item.query, currentEngineId))}
+                      className="flex-1 min-w-0 min-h-[52px] px-4 py-2.5 flex items-center gap-3 text-left cursor-pointer"
+                    >
+                      <span className="w-5 text-xs font-mono font-semibold text-cyan-400/90 tabular-nums shrink-0">
+                        {String(idx + 1).padStart(2, '0')}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs sm:text-sm font-medium text-slate-100 truncate">
+                          {item.query}
+                        </p>
+                        <p className="text-[11px] text-slate-400 truncate mt-0.5">
+                          {isBn ? item.topicBn : item.topicEn} · {activeEngine.name}
+                        </p>
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHomeQuery(item.query);
+                        searchInputRef.current?.focus();
+                      }}
+                      title={isBn ? 'সার্চ বারে বসান' : 'Fill search box'}
+                      className="min-w-[44px] min-h-[44px] mr-1 rounded-xl text-slate-400 hover:text-cyan-300 hover:bg-slate-800/80 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                    >
+                      <ArrowUpLeft className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Panel 2: Recent Bookmarks */}
+            <div
+              className={`rounded-2xl bg-slate-900/65 border border-slate-800/90 overflow-hidden ${
+                activeDiscoveryTab === 'bookmarks' ? 'block' : 'hidden md:block'
+              }`}
+            >
+              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/80">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Bookmark className="w-4 h-4 text-amber-400 shrink-0" />
+                  <h2 className="text-xs font-bold text-slate-200 tracking-wide truncate">
+                    {isBn ? 'সাম্প্রতিক বুকমার্ক' : 'Recent Bookmarks'}
+                  </h2>
+                </div>
+                {onOpenBookmarks && (
+                  <button
+                    type="button"
+                    onClick={onOpenBookmarks}
+                    className="min-h-[36px] px-2.5 py-1 rounded-lg text-[11px] font-medium text-cyan-400 hover:text-cyan-300 hover:bg-slate-800/80 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+                  >
+                    {isBn ? 'সব দেখুন' : 'View All'}
+                  </button>
+                )}
+              </div>
+
+              {visibleBookmarks.length === 0 ? (
+                <div className="px-4 py-8 text-center">
+                  <p className="text-xs text-slate-400 mb-3">
+                    {isBn
+                      ? 'এখনো কোনো বুকমার্ক সংরক্ষণ করা হয়নি।'
+                      : 'No bookmarks saved yet.'}
+                  </p>
+                  {onOpenBookmarks && (
+                    <button
+                      type="button"
+                      onClick={onOpenBookmarks}
+                      className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-cyan-300 transition-colors cursor-pointer"
+                    >
+                      {isBn ? 'বুকমার্ক ভল্ট খুলুন' : 'Open Bookmarks Vault'}
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-800/70">
+                  {visibleBookmarks.map((bm) => {
+                    const host = extractBookmarkHost(bm.url);
+                    return (
+                      <div
+                        key={bm.id}
+                        className="flex items-center justify-between hover:bg-slate-800/45 transition-colors"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => onNavigate(bm.url)}
+                          className="flex-1 min-w-0 min-h-[52px] px-4 py-2.5 flex items-center gap-3 text-left cursor-pointer"
+                        >
+                          <div className="w-8 h-8 rounded-lg bg-slate-800/90 border border-slate-700/60 flex items-center justify-center text-cyan-300 shrink-0">
+                            <Globe className="w-4 h-4" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs sm:text-sm font-medium text-slate-100 truncate">
+                              {bm.title}
+                            </p>
+                            <p className="text-[11px] text-slate-400 truncate mt-0.5 tabular-nums">
+                              {host} · {formatBookmarkRelativeTime(bm.timestamp, isBn)}
+                            </p>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRecentBookmarks(deleteBookmarkById(bm.id))}
+                          title={isBn ? 'বুকমার্ক মুছুন' : 'Remove bookmark'}
+                          className="min-w-[44px] min-h-[44px] mr-1 rounded-xl text-slate-500 hover:text-rose-400 hover:bg-slate-800/80 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
 
         {/* ============================================================== */}
         {/* 5. NATIVE ANDROID APK DOWNLOAD HUB (Hidden inside Android APK) */}

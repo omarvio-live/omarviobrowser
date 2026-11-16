@@ -141,23 +141,52 @@ export const onRequest: PagesFunction<Env> = async (context) => {
       }
     })();
 
-    // Reader Mode JSON extraction (?reader=1)
+    // Reader Mode JSON extraction (?reader=1): strips sidebars, ads, nav, and footers
     if (urlObj.searchParams.get('reader') === '1' && (contentType.includes('text/html') || contentType.includes('application/xhtml+xml'))) {
       const rawHtml = await response.text();
       const titleM = rawHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-      const cleanTitle = (titleM ? titleM[1].replace(/<[^>]+>/g, '').trim() : finalHost) || finalHost;
-      const bodyOnly = rawHtml
+      const ogTitleM = rawHtml.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
+      const cleanTitle = ((ogTitleM?.[1] || titleM?.[1] || finalHost).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()) || finalHost;
+      const cleanedHtml = rawHtml
         .replace(/<script[\s\S]*?<\/script>/gi, ' ')
         .replace(/<style[\s\S]*?<\/style>/gi, ' ')
         .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
-        .replace(/<(header|footer|nav|aside)[\s\S]*?<\/\1>/gi, ' ');
-      const paragraphs = Array.from(bodyOnly.matchAll(/<(p|h1|h2|h3|li)[^>]*>([\s\S]*?)<\/\1>/gi))
-        .map((m) => m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
-        .filter((t) => t.length > 28);
+        .replace(/<svg[\s\S]*?<\/svg>/gi, ' ')
+        .replace(/<iframe[\s\S]*?<\/iframe>/gi, ' ')
+        .replace(/<form[\s\S]*?<\/form>/gi, ' ')
+        .replace(/<(header|footer|nav|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+        .replace(
+          /<(div|section)\b[^>]*(?:id|class)=["'][^"']*(?:sidebar|footer|navbar|cookie|consent|advert|adsense|ad-box|ad-banner|ad-container|sponsored|promo|newsletter|social-share|related-post|comments|popup|overlay-ad)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi,
+          ' '
+        );
+      const articleM = cleanedHtml.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i);
+      const mainM = cleanedHtml.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
+      const targetRegion =
+        articleM && articleM[1].replace(/<[^>]+>/g, '').trim().length > 250
+          ? articleM[1]
+          : mainM && mainM[1].replace(/<[^>]+>/g, '').trim().length > 250
+          ? mainM[1]
+          : cleanedHtml;
+      const seenBlocks = new Set<string>();
+      const blocks: string[] = [];
+      for (const m of targetRegion.matchAll(/<(h1|h2|h3|p|blockquote|li)\b[^>]*>([\s\S]*?)<\/\1>/gi)) {
+        const tag = m[1].toLowerCase();
+        const txt = m[2].replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim();
+        if (!txt) continue;
+        if ((tag === 'p' || tag === 'li') && txt.length < 24) continue;
+        if ((tag === 'h1' || tag === 'h2' || tag === 'h3') && (txt.length < 4 || txt === cleanTitle)) continue;
+        const key = txt.toLowerCase();
+        if (seenBlocks.has(key)) continue;
+        seenBlocks.add(key);
+        if (tag === 'h1' || tag === 'h2') blocks.push(`## ${txt}`);
+        else if (tag === 'h3') blocks.push(`### ${txt}`);
+        else if (tag === 'blockquote') blocks.push(`> ${txt}`);
+        else blocks.push(txt);
+      }
       const textContent =
-        paragraphs.length > 0
-          ? paragraphs.slice(0, 60).join('\n\n')
-          : bodyOnly.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 6000);
+        blocks.length > 0
+          ? blocks.slice(0, 80).join('\n\n')
+          : targetRegion.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 7000);
       return new Response(
         JSON.stringify({ title: cleanTitle, url: finalUrl, content: textContent }),
         { headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' } }

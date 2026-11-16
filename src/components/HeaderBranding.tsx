@@ -8,23 +8,31 @@ import { ShieldCheck, Lock } from 'lucide-react';
 
 interface HeaderBrandingProps {
   compact?: boolean;
+  hideTextOnMobile?: boolean;
 }
 
-export const HeaderBranding: React.FC<HeaderBrandingProps> = ({ compact = false }) => {
+export const HeaderBranding: React.FC<HeaderBrandingProps> = ({
+  compact = false,
+  hideTextOnMobile = false,
+}) => {
   const logoPath = '/assets/omarvio-logo-256.webp';
 
   if (compact) {
     return (
       <div
-        className="flex items-center gap-2.5 select-none"
+        className="flex items-center gap-2 select-none"
         title="OMARVIO BROWSER"
       >
         <img
           src={logoPath}
           alt="OMARVIO BROWSER Logo"
-          className="w-8 h-8 aspect-square rounded-lg shadow-sm object-contain bg-black shrink-0"
+          className="w-7 h-7 sm:w-8 sm:h-8 aspect-square rounded-lg shadow-sm object-contain bg-black shrink-0"
         />
-        <span className="font-bold text-sm tracking-wide whitespace-nowrap shrink-0 bg-gradient-to-r from-blue-400 via-cyan-300 to-indigo-300 bg-clip-text text-transparent">
+        <span
+          className={`${
+            hideTextOnMobile ? 'hidden sm:inline' : 'inline'
+          } font-bold text-sm tracking-wide whitespace-nowrap shrink-0 bg-gradient-to-r from-blue-400 via-cyan-300 to-indigo-300 bg-clip-text text-transparent`}
+        >
           OMARVIO BROWSER
         </span>
       </div>

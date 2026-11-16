@@ -22,6 +22,7 @@ import {
   Share2,
   QrCode,
   MapPin,
+  BookOpen,
 } from 'lucide-react';
 import { Tab } from './types/browser';
 import { HeaderBranding } from './components/HeaderBranding';
@@ -78,6 +79,7 @@ import { auditUrlSecurity, SecurityAuditResult } from './engine/security';
 import { translateCurrentPage } from './engine/translator';
 import { getLanguage, subscribeLanguage, t } from './engine/i18n';
 import { addBrowsingHistory, clearAllBrowsingHistory } from './engine/history';
+import { isUrlBookmarked, toggleBookmark } from './engine/bookmarks';
 
 const createDefaultTab = (id?: string, isIncognito?: boolean): Tab => ({
   id: id || `tab-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
@@ -91,6 +93,7 @@ const createDefaultTab = (id?: string, isIncognito?: boolean): Tab => ({
   isSecure: true,
   createdAt: Date.now(),
   isDesktopMode: false,
+  isReadingMode: false,
   isIncognito: !!isIncognito,
   isBookmarked: false,
 });
@@ -326,11 +329,15 @@ export default function App() {
   };
 
   const handleToggleBookmark = () => {
-    const nextState = !activeTab.isBookmarked;
+    if (!activeTab.url) {
+      openSettings('vault');
+      return;
+    }
+    const { added } = toggleBookmark(activeTab.url, activeTab.title);
     setTabs((prev) =>
-      prev.map((t) => (t.id === activeTabId ? { ...t, isBookmarked: nextState } : t))
+      prev.map((t) => (t.id === activeTabId ? { ...t, isBookmarked: added } : t))
     );
-    triggerToast(nextState ? '★ Bookmark saved' : 'Bookmark removed');
+    triggerToast(added ? '★ Bookmark saved' : 'Bookmark removed');
   };
 
   const handleToggleDesktopSite = () => {
@@ -343,6 +350,22 @@ export default function App() {
       nextState
         ? '🖥️ Desktop site enabled (1024px viewport scaling)'
         : '📱 Mobile view restored'
+    );
+  };
+
+  const handleToggleReadingMode = (forceState?: boolean, targetTabId?: string) => {
+    const idToUpdate = targetTabId || activeTabId;
+    const current = tabs.find((t) => t.id === idToUpdate);
+    if (!current || !current.url) return;
+
+    const nextState = typeof forceState === 'boolean' ? forceState : !current.isReadingMode;
+    setTabs((prev) =>
+      prev.map((t) => (t.id === idToUpdate ? { ...t, isReadingMode: nextState } : t))
+    );
+    triggerToast(
+      nextState
+        ? '📖 ক্লিন রিডার মোড চালু হয়েছে — সাইডবার, বিজ্ঞাপন ও ফুটার সরানো হয়েছে'
+        : '🌐 ওয়েবসাইটের স্বাভাবিক ভিউ ফিরে এসেছে'
     );
   };
 
@@ -483,6 +506,7 @@ export default function App() {
             canGoBack: newHistory.length > 1,
             canGoForward: false,
             isLoading: true,
+            isReadingMode: false,
           };
         }
         return tab;
@@ -701,118 +725,112 @@ export default function App() {
       {/* Smart Auto-Hide "Add to Home Screen" Banner (hidden inside Native Android APK) */}
       {!isAndroidShell && <InstallBanner />}
 
-      {/* Top Header matching Chrome on Android */}
+      {/* Unified Top Browser Header (Consistent structure & styling across Home & Browsing modes) */}
       <header
         className={`w-full border-b px-2.5 sm:px-4 py-2 flex flex-col gap-1.5 z-30 safe-top shadow-md transition-colors ${
           isOledDark ? 'bg-black border-neutral-900' : 'bg-[#18191c] border-neutral-800'
         }`}
       >
-        {!activeTab.url ? (
-          /* HOME SCREEN HEADER: Unified single bar matching Website + Chrome Android */
-          <div className="w-full flex items-center justify-between gap-2 py-0.5">
-            <div
-              className="shrink-0 flex items-center gap-2"
-              title="OMARVIO Home"
+        <div className="w-full flex items-center gap-1 sm:gap-1.5">
+          {/* Desktop Navigation buttons (hidden on mobile, where bottom bar is used) */}
+          <div className="hidden md:flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={handleGoBack}
+              disabled={!activeTab.canGoBack}
+              className={`p-1.5 rounded-full transition-colors touch-manipulation ${
+                activeTab.canGoBack
+                  ? 'text-slate-200 hover:text-white hover:bg-white/10 active:scale-95 cursor-pointer'
+                  : 'text-slate-600 cursor-not-allowed'
+              }`}
+              title="Back"
             >
-              <HeaderBranding compact={true} />
-            </div>
+              <ChevronLeft className="w-5 h-5" />
+            </button>
 
-            {/* Right Action Icons matching Brave / Chrome Android */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              {/* Privacy Shield Badge */}
-              <button
-                type="button"
-                onClick={() => openSettings('privacy')}
-                title="OMARVIO Privacy Shield (Active - Zero Trackers)"
-                className="w-10 h-10 rounded-full bg-cyan-950/80 border border-cyan-400/50 flex items-center justify-center text-cyan-300 shadow-sm cursor-pointer hover:bg-cyan-900/60 transition-colors"
-              >
-                <ShieldCheck className="w-4 h-4 text-cyan-400" />
-              </button>
+            <button
+              type="button"
+              onClick={handleGoForward}
+              disabled={!activeTab.canGoForward}
+              className={`p-1.5 rounded-full transition-colors touch-manipulation ${
+                activeTab.canGoForward
+                  ? 'text-slate-200 hover:text-white hover:bg-white/10 active:scale-95 cursor-pointer'
+                  : 'text-slate-600 cursor-not-allowed'
+              }`}
+              title="Forward"
+            >
+              <ChevronRight className="w-5 h-5" />
+            </button>
 
-              {/* Tab Switcher Counter Badge [N] */}
-              <button
-                type="button"
-                onClick={() => setIsTabSwitcherOpen(true)}
-                title="Tabs Overview"
-                className="w-10 h-10 rounded-xl border border-[#3c4043] bg-[#28292c] text-[#e3e3e3] hover:text-white hover:border-cyan-400/60 font-mono font-bold text-xs transition-colors flex items-center justify-center active:scale-95 shadow-sm cursor-pointer tabular-nums"
-              >
-                {tabs.length}
-              </button>
-
-              {/* 3-Dot Overflow Menu */}
-              <button
-                type="button"
-                onClick={() => setIsChromeMenuOpen(true)}
-                title="More Options"
-                className="w-10 h-10 rounded-full text-[#c4c7c5] hover:text-white hover:bg-[#3c4043] flex items-center justify-center transition-colors active:scale-95 cursor-pointer"
-              >
-                <MoreVertical className="w-5 h-5" />
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={handleReload}
+              disabled={!activeTab.url}
+              className={`p-1.5 rounded-full transition-colors touch-manipulation ${
+                activeTab.url
+                  ? 'text-slate-300 hover:text-white hover:bg-white/10 active:scale-95 cursor-pointer'
+                  : 'text-slate-600 cursor-not-allowed'
+              }`}
+              title="Reload"
+            >
+              <RotateCw className={`w-4 h-4 ${activeTab.isLoading ? 'animate-spin text-cyan-400' : ''}`} />
+            </button>
           </div>
-        ) : (
-          /* WEBPAGE BROWSING HEADER: Home, Omnibox, Tab Badge, 3-Dots (Full controls on desktop) */
-          <div className="w-full flex items-center gap-1 sm:gap-1.5">
-            {/* Desktop Navigation buttons (hidden on mobile, where bottom bar is used) */}
-            <div className="hidden md:flex items-center gap-1 shrink-0">
-              <button
-                type="button"
-                onClick={handleGoBack}
-                disabled={!activeTab.canGoBack}
-                className={`p-1.5 rounded-full transition-colors touch-manipulation ${
-                  activeTab.canGoBack
-                    ? 'text-slate-200 hover:text-white hover:bg-white/10 active:scale-95'
-                    : 'text-slate-600 cursor-not-allowed'
-                }`}
-                title="Back"
-              >
-                <ChevronLeft className="w-5 h-5" />
-              </button>
 
-              <button
-                type="button"
-                onClick={handleGoForward}
-                disabled={!activeTab.canGoForward}
-                className={`p-1.5 rounded-full transition-colors touch-manipulation ${
-                  activeTab.canGoForward
-                    ? 'text-slate-200 hover:text-white hover:bg-white/10 active:scale-95'
-                    : 'text-slate-600 cursor-not-allowed'
-                }`}
-                title="Forward"
-              >
-                <ChevronRight className="w-5 h-5" />
-              </button>
-
-              <button
-                type="button"
-                onClick={handleReload}
-                className="p-1.5 rounded-full text-slate-300 hover:text-white hover:bg-white/10 transition-colors touch-manipulation active:scale-95"
-                title="Reload"
-              >
-                <RotateCw className={`w-4 h-4 ${activeTab.isLoading ? 'animate-spin text-cyan-400' : ''}`} />
-              </button>
-            </div>
-
-            {/* Home button */}
+          {/* Left Anchor: Compact Brand Mark on Home / Home Icon during active browsing */}
+          {!activeTab.url ? (
             <button
               type="button"
               onClick={handleGoHome}
-              className="p-1.5 sm:p-2 rounded-full text-cyan-400 hover:text-white hover:bg-white/10 transition-colors touch-manipulation active:scale-95 shrink-0"
+              title="OMARVIO Home"
+              className="p-1 sm:px-2 sm:py-1 rounded-full hover:bg-white/10 transition-colors touch-manipulation active:scale-95 shrink-0 flex items-center cursor-pointer"
+            >
+              <HeaderBranding compact={true} hideTextOnMobile={true} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleGoHome}
+              className="p-1.5 sm:p-2 rounded-full text-cyan-400 hover:text-white hover:bg-white/10 transition-colors touch-manipulation active:scale-95 shrink-0 cursor-pointer"
               title="Home"
             >
               <Home className="w-4 h-4 sm:w-5 sm:h-5" />
             </button>
+          )}
 
-            {/* Omnibox Address & Search Bar for Active Page: Now takes maximum space! */}
-            <div className="flex-1 min-w-0">
-              <Omnibox
-                currentUrl={activeTab.url}
-                isLoading={activeTab.isLoading}
-                onNavigate={handleNavigate}
-                onOpenLens={() => setIsLensOpen(true)}
-                onOpenSearchOverlay={() => handleOpenSearchSuggestions(activeTab.url)}
-              />
-            </div>
+          {/* Unified Omnibox Address & Search Bar */}
+          <div className="flex-1 min-w-0">
+            <Omnibox
+              currentUrl={activeTab.url}
+              isLoading={activeTab.isLoading}
+              onNavigate={handleNavigate}
+              onOpenLens={() => setIsLensOpen(true)}
+              onOpenSearchOverlay={() => handleOpenSearchSuggestions(activeTab.url)}
+            />
+          </div>
+
+          {/* Right Action Controls (Unified across Home & Browsing modes) */}
+          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+            {/* Quick Reading Mode Toggle: visible on tablet/desktop */}
+            <button
+              type="button"
+              onClick={() => handleToggleReadingMode()}
+              disabled={!activeTab.url}
+              title={
+                activeTab.isReadingMode
+                  ? 'Exit Reading Mode'
+                  : 'Reading Mode (Strip sidebars, ads & footers)'
+              }
+              className={`hidden sm:flex w-8 h-8 rounded-lg items-center justify-center transition-colors active:scale-95 shrink-0 touch-manipulation ${
+                !activeTab.url
+                  ? 'text-slate-600 cursor-not-allowed opacity-50'
+                  : activeTab.isReadingMode
+                  ? 'bg-cyan-500/20 border border-cyan-400/60 text-cyan-300 cursor-pointer'
+                  : 'text-[#c4c7c5] hover:text-white hover:bg-[#3c4043] cursor-pointer'
+              }`}
+            >
+              <BookOpen className="w-4 h-4" />
+            </button>
 
             {/* Quick Translate Button: visible on tablet/desktop */}
             <button
@@ -834,12 +852,22 @@ export default function App() {
               <Share2 className="w-4 h-4 text-cyan-300" />
             </button>
 
+            {/* Privacy Shield Badge */}
+            <button
+              type="button"
+              onClick={() => openSettings('privacy')}
+              title="OMARVIO Privacy Shield (Active - Zero Trackers)"
+              className="w-8 h-8 rounded-lg bg-cyan-950/70 border border-cyan-500/35 flex items-center justify-center text-cyan-300 hover:bg-cyan-900/60 transition-colors active:scale-95 cursor-pointer shrink-0 touch-manipulation"
+            >
+              <ShieldCheck className="w-4 h-4 text-cyan-400" />
+            </button>
+
             {/* Tab Counter Badge [N] */}
             <button
               type="button"
               onClick={() => setIsTabSwitcherOpen(true)}
               title="Tabs Overview"
-              className="w-8 h-8 rounded-lg border border-[#3c4043] bg-[#28292c] text-[#e3e3e3] hover:text-white hover:border-cyan-400/60 font-mono font-bold text-xs transition-colors flex items-center justify-center active:scale-95 shadow-sm cursor-pointer shrink-0 touch-manipulation"
+              className="w-8 h-8 rounded-lg border border-[#3c4043] bg-[#28292c] text-[#e3e3e3] hover:text-white hover:border-cyan-400/60 font-mono font-bold text-xs tabular-nums transition-colors flex items-center justify-center active:scale-95 shadow-sm cursor-pointer shrink-0 touch-manipulation"
             >
               {tabs.length}
             </button>
@@ -854,7 +882,7 @@ export default function App() {
               <MoreVertical className="w-5 h-5" />
             </button>
           </div>
-        )}
+        </div>
 
         {/* Desktop Horizontal Tab Bar (Visible on medium/large desktop screens) */}
         <div className="hidden md:block pt-0.5">
@@ -903,6 +931,7 @@ export default function App() {
             onOpenSearchSuggestions={handleOpenSearchSuggestions}
             onOpenIncognitoTab={handleNewIncognitoTab}
             onOpenAIMode={() => openSettings('ai')}
+            onOpenBookmarks={() => openSettings('vault')}
           />
         )}
 
@@ -925,11 +954,13 @@ export default function App() {
                 url={tab.url}
                 tabId={tab.id}
                 isDesktopMode={tab.isDesktopMode}
+                isReadingMode={!!tab.isReadingMode}
                 isActive={isActive}
                 isSleeping={isSleeping}
                 onLoadStart={() => handleLoadStart(tab.id)}
                 onLoadEnd={() => handleLoadEnd(tab.id)}
                 onUrlChange={(newUrl) => handleUrlChangeFromFrame(newUrl, tab.id)}
+                onToggleReadingMode={(next) => handleToggleReadingMode(next, tab.id)}
                 onToast={triggerToast}
                 onShare={handleShare}
               />
@@ -976,8 +1007,9 @@ export default function App() {
         isHomePage={!activeTab.url}
         canGoBack={activeTab.canGoBack}
         canGoForward={activeTab.canGoForward}
-        isBookmarked={!!activeTab.isBookmarked}
+        isBookmarked={Boolean(activeTab.url && (activeTab.isBookmarked || isUrlBookmarked(activeTab.url)))}
         isDesktopMode={!!activeTab.isDesktopMode}
+        isReadingMode={!!activeTab.isReadingMode}
         onGoBack={handleGoBack}
         onGoForward={handleGoForward}
         onToggleBookmark={handleToggleBookmark}
@@ -995,7 +1027,7 @@ export default function App() {
         onShare={() => handleShare()}
         onFindInPage={() => setIsFindInPageOpen(true)}
         onTranslate={handleTranslateWebPage}
-        onToggleReadingMode={() => triggerToast('📄 Smart Reader Mode Active')}
+        onToggleReadingMode={() => handleToggleReadingMode()}
         onInstallShortcut={() => triggerToast('📲 Omarvio Shortcut Created on Device')}
         onOpenDefaultBrowser={() => setIsDefaultBrowserModalOpen(true)}
         onToggleDesktopSite={handleToggleDesktopSite}
