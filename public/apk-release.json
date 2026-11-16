@@ -1,8 +1,8 @@
 {
   "repo": "omarvio-live/omarviobrowser",
   "apkUrl": "https://github.com/omarvio-live/omarviobrowser/releases/latest/download/omarvio-browser.apk",
-  "version": "2.0.0.11",
-  "versionCode": 11,
+  "version": "2.0.0.12",
+  "versionCode": 12,
   "host": "github-releases",
-  "updatedAt": "2026-11-14T15:12:52.238Z"
+  "updatedAt": "2026-11-16T19:26:26.528Z"
 }
