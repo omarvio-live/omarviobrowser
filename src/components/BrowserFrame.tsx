@@ -16,6 +16,8 @@ import {
   ShieldCheck,
   BookOpen,
   Zap,
+  Lock,
+  ArrowLeft,
 } from 'lucide-react';
 import { SearchResultsView } from './SearchResultsView';
 import { SmartReaderView } from './SmartReaderView';
@@ -24,6 +26,15 @@ import { attachPassiveLinkInterceptor } from '../engine/linkInterceptor';
 import { enablePersistentStorage } from '../engine/swRegister';
 import { putTabToSleep, wakeSleepingTab } from '../engine/tabManager';
 import { extractReadableArticleFromDocument } from '../engine/readerExtractor';
+import {
+  getPrivacyFilterSettings,
+  subscribePrivacyFilterSettings,
+  runAdblockerMiddleware,
+  serializeEnabledListsParam,
+  allowHttpHostOnce,
+  isHttpAllowedForHost,
+  PrivacyFilterSettings,
+} from '../engine/adblocker';
 
 interface BrowserFrameProps {
   url: string;
@@ -75,9 +86,27 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
   const [isReaderModeActive, setIsReaderModeActive] = useState(false);
   const [isReaderLoading, setIsReaderLoading] = useState(false);
   const [readerArticle, setReaderArticle] = useState<{ title: string; url: string; content: string } | null>(null);
+  const [privacySettings, setPrivacySettings] = useState<PrivacyFilterSettings>(getPrivacyFilterSettings);
+  const [blockedNotice, setBlockedNotice] = useState<{
+    url: string;
+    blockedBy: 'tracker' | 'ad' | 'malware';
+    reason: string;
+  } | null>(null);
+  const [httpsWarning, setHttpsWarning] = useState<{
+    httpsUrl: string;
+    httpUrl: string;
+    host: string;
+    reason: string;
+  } | null>(null);
 
   // Optimistic navigation state to eliminate blank/white screen flicker
   const [isOptimisticNavigating, setIsOptimisticNavigating] = useState(false);
+
+  useEffect(() => {
+    return subscribePrivacyFilterSettings((next) => {
+      setPrivacySettings(next);
+    });
+  }, []);
 
   // Prevent callback prop changes from re-triggering navigation effect
   const onLoadStartRef = useRef(onLoadStart);
@@ -172,51 +201,73 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
     }
   };
 
-  // Convert target URL to embeddable / sanitized preview stream
-  const getProcessedSrc = useCallback((targetUrl: string, forceBypass = false): string => {
-    if (!targetUrl || targetUrl === 'about:blank') return 'about:blank';
+  // Convert target URL to embeddable / sanitized preview stream via custom adblocker middleware
+  const getProcessedSrc = useCallback(
+    (targetUrl: string, forceBypass = false, allowInsecureHttp = false): string => {
+      if (!targetUrl || targetUrl === 'about:blank') return 'about:blank';
 
-    let cleanTarget = targetUrl;
+      let cleanTarget = targetUrl;
 
-    // Unwrap any accidentally nested proxy URLs to prevent infinite recursive proxying
-    if (cleanTarget.includes('/api/proxy?url=')) {
-      try {
-        const u = new URL(cleanTarget, window.location.origin);
-        const extracted = u.searchParams.get('url');
-        if (extracted) cleanTarget = extracted;
-      } catch {}
-    }
-
-    if (!cleanTarget.startsWith('http://') && !cleanTarget.startsWith('https://')) {
-      cleanTarget = `https://${cleanTarget}`;
-    }
-
-    // Direct YouTube video embed when watching a specific video
-    const ytId = extractYouTubeId(cleanTarget);
-    if (ytId) {
-      return `https://www.youtube-nocookie.com/embed/${ytId}?autoplay=1&enablejsapi=1&rel=0&modestbranding=1`;
-    }
-
-    // Safely optimize major platforms to mobile web variants using exact hostname checks
-    try {
-      const u = new URL(cleanTarget);
-      const host = u.hostname.toLowerCase();
-      if (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.m.youtube.com') {
-        u.hostname = 'm.youtube.com';
-        cleanTarget = u.toString();
-      } else if (host === 'facebook.com' || host === 'www.facebook.com' || host === 'm.m.facebook.com' || host === 'www.m.facebook.com') {
-        u.hostname = 'm.facebook.com';
-        cleanTarget = u.toString();
-      } else if (host === 'wikipedia.org' || host === 'www.wikipedia.org' || host === 'm.m.wikipedia.org') {
-        u.hostname = 'm.wikipedia.org';
-        cleanTarget = u.toString();
+      // Unwrap any accidentally nested proxy URLs to prevent infinite recursive proxying
+      if (cleanTarget.includes('/api/proxy?url=')) {
+        try {
+          const u = new URL(cleanTarget, window.location.origin);
+          const extracted = u.searchParams.get('url');
+          if (extracted) cleanTarget = extracted;
+        } catch {}
       }
-    } catch {}
 
-    const bypassParam = forceBypass ? `&_reval=${Date.now()}` : '';
-    // Route through universal edge proxy
-    return `/api/proxy?url=${encodeURIComponent(cleanTarget)}${bypassParam}`;
-  }, []);
+      if (!cleanTarget.startsWith('http://') && !cleanTarget.startsWith('https://')) {
+        cleanTarget = `https://${cleanTarget}`;
+      }
+
+      // Execute custom adblocker middleware BEFORE hitting the browser frame
+      const mw = runAdblockerMiddleware({
+        url: cleanTarget,
+        resourceType: 'document',
+        settings: privacySettings,
+        recordStats: false,
+        skipHttpsUpgrade: allowInsecureHttp,
+      });
+
+      if (!mw.allowed) {
+        return 'about:blank';
+      }
+
+      cleanTarget = mw.cleanedUrl;
+
+      // Direct YouTube video embed when watching a specific video
+      const ytId = extractYouTubeId(cleanTarget);
+      if (ytId) {
+        return `https://www.youtube-nocookie.com/embed/${ytId}?autoplay=1&enablejsapi=1&rel=0&modestbranding=1`;
+      }
+
+      // Safely optimize major platforms to mobile web variants using exact hostname checks
+      try {
+        const u = new URL(cleanTarget);
+        const host = u.hostname.toLowerCase();
+        if (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.m.youtube.com') {
+          u.hostname = 'm.youtube.com';
+          cleanTarget = u.toString();
+        } else if (host === 'facebook.com' || host === 'www.facebook.com' || host === 'm.m.facebook.com' || host === 'www.m.facebook.com') {
+          u.hostname = 'm.facebook.com';
+          cleanTarget = u.toString();
+        } else if (host === 'wikipedia.org' || host === 'www.wikipedia.org' || host === 'm.m.wikipedia.org') {
+          u.hostname = 'm.wikipedia.org';
+          cleanTarget = u.toString();
+        }
+      } catch {}
+
+      const tbFlag = privacySettings.aggressiveTrackerBlocking ? '1' : '0';
+      const afFlag = privacySettings.adsFiltering ? '1' : '0';
+      const hoFlag = privacySettings.httpsOnlyMode && !allowInsecureHttp && !isHttpAllowedForHost(cleanTarget) ? '1' : '0';
+      const listsParam = encodeURIComponent(serializeEnabledListsParam(privacySettings.enabledLists));
+      const allowHttpParam = allowInsecureHttp || isHttpAllowedForHost(cleanTarget) ? '&allowHttp=1' : '';
+      const bypassParam = forceBypass ? `&_reval=${Date.now()}` : '';
+      return `/api/proxy?url=${encodeURIComponent(cleanTarget)}&tb=${tbFlag}&af=${afFlag}&ho=${hoFlag}&lists=${listsParam}${allowHttpParam}${bypassParam}`;
+    },
+    [privacySettings]
+  );
 
   // Compute initial src directly to eliminate frame-0 delay
   const [activeFrameSrc, setActiveFrameSrc] = useState<string>(() => getProcessedSrc(url));
@@ -225,19 +276,48 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
   const lastProcessedUrlRef = useRef<string>('');
   const proxyHandshakeRef = useRef<boolean>(false);
 
-  // 1. Listen to navigation & download events from inside the sandboxed iframe
+  // 1. Listen to navigation, HTTPS-Only warnings & download events from inside the sandboxed iframe
   useEffect(() => {
     const handleWindowMessage = (e: MessageEvent) => {
       if (e.data && e.data.type === 'OMARVIO_PROXY_READY') {
         proxyHandshakeRef.current = true;
         setHasError(false);
+        setHttpsWarning(null);
         setIsOptimisticNavigating(false);
         onLoadEndRef.current?.();
       }
+      if (e.data && e.data.type === 'OMARVIO_HTTPS_WARNING') {
+        setIsOptimisticNavigating(false);
+        onLoadEndRef.current?.();
+        setHttpsWarning({
+          httpsUrl: e.data.httpsUrl || url,
+          httpUrl: e.data.httpUrl || (url.startsWith('https://') ? `http://${url.slice(8)}` : url),
+          host: e.data.host || '',
+          reason: e.data.reason || 'এই সাইটটি নিরাপদ HTTPS এনক্রিপশন সাপোর্ট করে না।',
+        });
+      }
       if (e.data && e.data.type === 'OMARVIO_NAVIGATE' && typeof e.data.url === 'string') {
-        const nextTarget = e.data.url;
+        const mw = runAdblockerMiddleware({
+          url: e.data.url,
+          resourceType: 'document',
+          settings: privacySettings,
+        });
+        if (!mw.allowed) {
+          if (onToast) {
+            onToast(
+              mw.blockedBy === 'malware'
+                ? '🛡️ Malware & Phishing shield blocked a dangerous URL.'
+                : mw.blockedBy === 'ad'
+                ? '🛡️ Ads Filtering middleware blocked an ad redirect.'
+                : '🛡️ Aggressive Tracker Blocking prevented a tracker redirect.'
+            );
+          }
+          return;
+        }
+        const nextTarget = mw.cleanedUrl;
         lastInternalNavUrlRef.current = nextTarget;
         lastProcessedUrlRef.current = nextTarget;
+        setHttpsWarning(null);
         setIsOptimisticNavigating(false);
         onUrlChange(nextTarget);
       }
@@ -249,25 +329,36 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
     };
     window.addEventListener('message', handleWindowMessage);
     return () => window.removeEventListener('message', handleWindowMessage);
-  }, [onUrlChange, onToast]);
+  }, [onUrlChange, onToast, privacySettings, url]);
 
   // 2. Attach passive link interceptor for instantaneous 0ms transitions on touch/click
   useEffect(() => {
     if (!containerRef.current) return;
     const cleanup = attachPassiveLinkInterceptor(containerRef.current, {
       onImmediateTransition: (destinationUrl) => {
+        const mw = runAdblockerMiddleware({
+          url: destinationUrl,
+          resourceType: 'document',
+          settings: privacySettings,
+        });
+        if (!mw.allowed) {
+          if (onToast) {
+            onToast('🛡️ Privacy middleware blocked an ad/tracker destination before loading.');
+          }
+          return;
+        }
         setIsOptimisticNavigating(true);
-        lastInternalNavUrlRef.current = destinationUrl;
-        onUrlChange(destinationUrl);
+        lastInternalNavUrlRef.current = mw.cleanedUrl;
+        onUrlChange(mw.cleanedUrl);
       },
-      onTrackerCleaned: (cleanUrl, count) => {
+      onTrackerCleaned: (_cleanUrl, count) => {
         if (onToast && count > 0) {
           onToast(`🛡️ ${count}টি ট্র্যাকার প্যারামিটার সফলভাবে মুছে ফেলা হয়েছে`);
         }
       },
     });
     return cleanup;
-  }, [onUrlChange, onToast]);
+  }, [onUrlChange, onToast, privacySettings]);
 
   // 3. Desktop mode scaling
   useEffect(() => {
@@ -310,11 +401,13 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
   }, [url]);
 
 
-  // 4. Handle URL change with ZERO-FLICKER DOUBLE BUFFERING & ZERO INFINITE LOOPS
+  // 4. Handle URL change with pre-frame Adblocker Middleware + zero-flicker buffering
   useEffect(() => {
     if (!url) return;
 
     setHasError(false);
+    setBlockedNotice(null);
+    setHttpsWarning(null);
     proxyHandshakeRef.current = false;
 
     // Instant local views complete in 0ms without network roundtrips
@@ -324,9 +417,31 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
       return;
     }
 
-    const targetSrc = getProcessedSrc(url);
+    // Intercept & clean request BEFORE it hits the iframe
+    const mw = runAdblockerMiddleware({
+      url,
+      resourceType: 'document',
+      settings: privacySettings,
+    });
+
+    if (!mw.allowed) {
+      setBlockedNotice({
+        url: mw.cleanedUrl,
+        blockedBy: mw.blockedBy || 'tracker',
+        reason: mw.reason || 'Blocked by Omarvio Privacy Middleware',
+      });
+      setActiveFrameSrc('about:blank');
+      if (iframeRef.current) {
+        iframeRef.current.src = 'about:blank';
+      }
+      setIsOptimisticNavigating(false);
+      onLoadEndRef.current?.();
+      return;
+    }
+
+    const targetSrc = getProcessedSrc(mw.cleanedUrl);
     const currentIframeSrc = iframeRef.current?.getAttribute('src') || iframeRef.current?.src || '';
-    const currentNorm = normalizeUrlKey(url);
+    const currentNorm = normalizeUrlKey(mw.cleanedUrl);
     const lastInternalNorm = normalizeUrlKey(lastInternalNavUrlRef.current);
 
     // If an in-frame link click already navigated the iframe, avoid interrupting it
@@ -344,7 +459,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
 
     // Always clear internal navigation marker so back/forward or second-step clicks are never blocked
     lastInternalNavUrlRef.current = '';
-    lastProcessedUrlRef.current = url;
+    lastProcessedUrlRef.current = mw.cleanedUrl;
 
     // Failsafe timer: ensures optimistic navigating bar and loading spinner stop within 6s even if network stalls
     const timer = setTimeout(() => {
@@ -353,7 +468,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
     }, 6000);
 
     return () => clearTimeout(timer);
-  }, [url, isSearchResultsUrl, getProcessedSrc]);
+  }, [url, isSearchResultsUrl, getProcessedSrc, privacySettings]);
 
   // 4b. Reading Mode content extraction (0ms live-DOM extraction + /api/proxy?reader=1 fallback)
   useEffect(() => {
@@ -390,20 +505,41 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
       }
     } catch {}
 
-    // Fallback to backend /api/proxy?reader=1 clean article extractor
+    // Fallback to backend /api/proxy?reader=1 clean article extractor (pre-cleaned by middleware)
+    const mwReader = runAdblockerMiddleware({
+      url,
+      resourceType: 'fetch',
+      settings: privacySettings,
+      recordStats: false,
+    });
+    if (!mwReader.allowed) {
+      setIsReaderLoading(false);
+      return;
+    }
+
     setIsReaderLoading(true);
     setReaderArticle((prev) =>
-      prev && prev.url === url ? prev : { title: safeTitle, url, content: '' }
+      prev && prev.url === mwReader.cleanedUrl ? prev : { title: safeTitle, url: mwReader.cleanedUrl, content: '' }
     );
 
-    fetch(`/api/proxy?url=${encodeURIComponent(url)}&reader=1`, { signal: controller.signal })
+    const tbFlag = privacySettings.aggressiveTrackerBlocking ? '1' : '0';
+    const afFlag = privacySettings.adsFiltering ? '1' : '0';
+    const hoFlag = privacySettings.httpsOnlyMode ? '1' : '0';
+    const listsParam = encodeURIComponent(serializeEnabledListsParam(privacySettings.enabledLists));
+
+    fetch(
+      `/api/proxy?url=${encodeURIComponent(mwReader.cleanedUrl)}&reader=1&tb=${tbFlag}&af=${afFlag}&ho=${hoFlag}&lists=${listsParam}`,
+      {
+        signal: controller.signal,
+      }
+    )
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (cancelled) return;
         if (data && typeof data.content === 'string') {
           setReaderArticle({
             title: data.title || safeTitle,
-            url: data.url || url,
+            url: data.url || mwReader.cleanedUrl,
             content: data.content,
           });
         }
@@ -417,7 +553,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
       cancelled = true;
       controller.abort();
     };
-  }, [isReadingMode, url, isSearchResultsUrl, isSleeping]);
+  }, [isReadingMode, url, isSearchResultsUrl, isSleeping, privacySettings]);
 
   /**
    * Milestone 29: WebView Memory Optimization Strategy
@@ -673,7 +809,89 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
             />
           )}
 
-          {!showReaderOverlay && !isSearchResultsUrl && hasError && (
+          {!showReaderOverlay && !isSearchResultsUrl && blockedNotice && (
+            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center max-w-md mx-auto select-none">
+              <div className="w-14 h-14 rounded-3xl bg-emerald-950/50 border border-emerald-500/40 flex items-center justify-center text-emerald-400 mb-4 shadow-lg shadow-emerald-950/40">
+                <ShieldCheck className="w-7 h-7" />
+              </div>
+              <h3 className="text-lg font-bold text-slate-100 mb-1">
+                {blockedNotice.blockedBy === 'malware'
+                  ? 'Malware & Phishing Shield Active'
+                  : blockedNotice.blockedBy === 'ad'
+                  ? 'Ads Filtering Middleware Active'
+                  : 'Aggressive Tracker Blocking Active'}
+              </h3>
+              <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+                {blockedNotice.blockedBy === 'malware'
+                  ? 'ওমারভিও সিকিউরিটি ফিল্টার এই ক্ষতিকর ফিশিং বা ম্যালওয়্যার ডোমেইনটি ওপেন হওয়ার আগেই ব্লক করেছে।'
+                  : blockedNotice.blockedBy === 'ad'
+                  ? 'ওমারভিও অ্যাডব্লকার মিডলওয়্যার এই বিজ্ঞাপনী ডোমেইনটি ব্রাউজার ফ্রেমে লোড হওয়ার আগেই ব্লক করেছে।'
+                  : 'ওমারভিও প্রাইভেসি মিডলওয়্যার এই ট্র্যাকার ও টেলিমেট্রি রিকোয়েস্টটি ব্রাউজার ফ্রেমে পৌঁছানোর আগেই আটকে দিয়েছে।'}
+              </p>
+              <div className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-[11px] font-mono text-cyan-300 break-all mb-4">
+                {blockedNotice.url}
+              </div>
+              <button
+                type="button"
+                onClick={() => onUrlChange('')}
+                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md active:scale-95"
+              >
+                <span>হোম স্ক্রিনে ফিরে যান</span>
+              </button>
+            </div>
+          )}
+
+          {!showReaderOverlay && !isSearchResultsUrl && !blockedNotice && httpsWarning && (
+            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center max-w-md mx-auto select-none animate-fadeIn">
+              <div className="w-14 h-14 rounded-3xl bg-amber-950/60 border border-amber-500/50 flex items-center justify-center text-amber-400 mb-4 shadow-lg shadow-amber-950/40">
+                <Lock className="w-7 h-7" />
+              </div>
+              <h3 className="text-lg font-bold text-amber-100 mb-1">
+                HTTPS-Only Mode Warning
+              </h3>
+              <p className="text-xs text-slate-300 mb-3 leading-relaxed">
+                এই সাইটটি নিরাপদ HTTPS এনক্রিপশন সমর্থন করে না। সাধারণ HTTP সংযোগে ডেটা এনক্রিপ্টেড থাকে না।
+              </p>
+              <div className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-amber-500/30 text-[11px] font-mono text-amber-300 break-all mb-4">
+                {httpsWarning.httpUrl}
+              </div>
+              <div className="w-full flex flex-col gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHttpsWarning(null);
+                    onUrlChange('');
+                  }}
+                  className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md active:scale-95"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>Go Back to Safety (নিরাপদে ফিরে যান)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetHttp = httpsWarning.httpUrl;
+                    allowHttpHostOnce(httpsWarning.host || targetHttp);
+                    setHttpsWarning(null);
+                    setHasError(false);
+                    setIsOptimisticNavigating(true);
+                    onLoadStartRef.current?.();
+                    const bypassSrc = getProcessedSrc(targetHttp, true, true);
+                    setActiveFrameSrc(bypassSrc);
+                    if (iframeRef.current) {
+                      iframeRef.current.src = bypassSrc;
+                    }
+                    if (onToast) onToast('⚠️ সাময়িকভাবে HTTP সংযোগে প্রবেশ করা হচ্ছে');
+                  }}
+                  className="w-full py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 border border-amber-500/40 text-amber-300 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer"
+                >
+                  <span>Continue to HTTP Site Anyway</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {!showReaderOverlay && !isSearchResultsUrl && !blockedNotice && !httpsWarning && hasError && (
             /* ========================================================================= */
             /* 3. CONNECTION RECOVERY CARD (REPLACES DEAD GREY FROWNY PAGE)              */
             /* ========================================================================= */
@@ -706,7 +924,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
                     setIsOptimisticNavigating(true);
                     onLoadStartRef.current?.();
                     if (iframeRef.current) {
-                      iframeRef.current.src = `/api/proxy?url=${encodeURIComponent(url)}`;
+                      iframeRef.current.src = getProcessedSrc(url, true);
                     }
                   }}
                   className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md active:scale-95 touch-manipulation"
@@ -747,7 +965,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
           )}
 
           {/* Live Webpage Iframe kept mounted cleanly so toggling Reading Mode back is instant */}
-          {!isSearchResultsUrl && !hasError && (
+          {!isSearchResultsUrl && !blockedNotice && !httpsWarning && !hasError && (
             <div
               className={`relative w-full h-full overflow-hidden bg-[#070913] flex-col ${
                 showReaderOverlay ? 'hidden' : 'flex'

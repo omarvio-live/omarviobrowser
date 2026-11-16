@@ -1,7 +1,7 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
- * 
+ *
  * OMARVIO BROWSER - 100% In-App Blob & Storage Downloader Engine
  * Keeps all downloads strictly inside OmarVio without leaking to external Chrome!
  * Copyright (c) OMARVIO GLOBAL LTD.
@@ -9,6 +9,8 @@
  */
 
 import { addLocalDownload, SavedDownloadItem } from './mediaSaver';
+import { notifyDownloadCaptured } from './proxy';
+import { registerDownloadInAndroid } from './nativeBridge';
 
 export interface InAppDownloadResult {
   success: boolean;
@@ -19,7 +21,7 @@ export interface InAppDownloadResult {
 
 /**
  * Downloads a web file or media stream directly into OmarVio's internal Blob vault
- * bypassing external Chrome / host browser download dialogs.
+ * using CORS + server /api/proxy-download fallback so downloads stay inside Omarvio.
  */
 export const downloadFileInApp = async (
   fileUrl: string,
@@ -31,11 +33,10 @@ export const downloadFileInApp = async (
   }
 
   try {
-    // 1. Determine filename and file type
     let filename = preferredName || '';
     if (!filename) {
       try {
-        const u = new URL(fileUrl);
+        const u = new URL(fileUrl, window.location.origin);
         const segments = u.pathname.split('/');
         filename = segments[segments.length - 1] || 'downloaded_file';
       } catch {
@@ -43,38 +44,48 @@ export const downloadFileInApp = async (
       }
     }
 
-    // Auto-detect type if not specified
     let determinedType: 'pdf' | 'doc' | 'audio' | 'video' = type || 'doc';
     const lowerName = filename.toLowerCase();
     if (lowerName.endsWith('.pdf')) determinedType = 'pdf';
     else if (lowerName.match(/\.(mp3|m4a|wav|ogg|aac)$/)) determinedType = 'audio';
     else if (lowerName.match(/\.(mp4|webm|mkv|mov)$/)) determinedType = 'video';
-    else if (lowerName.match(/\.(txt|md|csv|json|html|docx?|xlsx?)$/)) determinedType = 'doc';
+    else if (lowerName.match(/\.(txt|md|csv|json|html|docx?|xlsx?|apk)$/)) determinedType = 'doc';
 
     let blobUrl = fileUrl;
-    let sizeStr = '2.4 MB';
+    let sizeStr = 'Saved In-App';
 
-    // 2. Try fetching as Blob internally to cache in local client memory
-    try {
-      const response = await fetch(fileUrl, { mode: 'cors' });
-      if (response.ok) {
-        const blob = await response.blob();
-        blobUrl = URL.createObjectURL(blob);
-        const sizeBytes = blob.size;
-        if (sizeBytes < 1024 * 1024) {
-          sizeStr = `${(sizeBytes / 1024).toFixed(1)} KB`;
-        } else {
-          sizeStr = `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+    const tryFetchBlob = async (target: string): Promise<Blob | null> => {
+      try {
+        const response = await fetch(target, { mode: 'cors' });
+        if (response.ok) {
+          return await response.blob();
         }
-      }
-    } catch {
-      // If CORS prevents full blob fetch, keep original sanitized URL in offline cache
-      sizeStr = '1.8 MB (Cached)';
+      } catch {}
+      return null;
+    };
+
+    // 1. Try direct fetch first, then proxy-download fallback so CORS never breaks in-app storage
+    let blob = await tryFetchBlob(fileUrl);
+    if (!blob && typeof window !== 'undefined' && /^https?:\/\//i.test(fileUrl)) {
+      const proxied = `/api/proxy-download?url=${encodeURIComponent(fileUrl)}&filename=${encodeURIComponent(filename)}`;
+      blob = await tryFetchBlob(proxied);
     }
 
-    // 3. Save to OmarVio's Internal Downloads Hub
+    if (blob) {
+      blobUrl = URL.createObjectURL(blob);
+      const sizeBytes = blob.size;
+      if (sizeBytes < 1024 * 1024) {
+        sizeStr = `${Math.max(0.1, sizeBytes / 1024).toFixed(1)} KB`;
+      } else {
+        sizeStr = `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+      }
+    } else {
+      sizeStr = 'In-App Link';
+    }
+
+    // 2. Save to OmarVio's Internal Downloads Hub + Notify Observers + Sync with Android Shell
     const newItem: SavedDownloadItem = {
-      id: `dl-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      id: `dl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       title: filename,
       type: determinedType,
       size: sizeStr,
@@ -83,10 +94,12 @@ export const downloadFileInApp = async (
     };
 
     addLocalDownload(newItem);
+    notifyDownloadCaptured(newItem);
+    registerDownloadInAndroid(fileUrl, filename, determinedType);
 
     return {
       success: true,
-      message: `📥 ওমারভিও ইন-অ্যাপ স্টোরেজে সংরক্ষিত হয়েছে: ${filename}`,
+      message: `📥 ওমারভিও ডাউনলোড হাব-এ সংরক্ষিত হয়েছে: ${filename}`,
       item: newItem,
       blobUrl,
     };
@@ -124,6 +137,7 @@ export const saveWebpageArticleOffline = (
   };
 
   addLocalDownload(newItem);
+  notifyDownloadCaptured(newItem);
 
   return {
     success: true,

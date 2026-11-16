@@ -62,6 +62,17 @@ import {
   deleteBookmarkById,
   subscribeBookmarks,
 } from '../engine/bookmarks';
+import {
+  getPrivacyFilterSettings,
+  setPrivacyFilterSettings,
+  subscribePrivacyFilterSettings,
+  getAdblockStats,
+  subscribeAdblockStats,
+  PrivacyFilterSettings,
+  ADBLOCK_FILTER_LISTS,
+  AdblockListId,
+} from '../engine/adblocker';
+import { syncPrivacyConfigWithAndroid } from '../engine/nativeBridge';
 
 export type SettingsTabId =
   | 'general'
@@ -308,14 +319,6 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
       return true;
     }
   });
-  const [httpsOnly, setHttpsOnly] = useState<boolean>(() => {
-    try {
-      const v = localStorage.getItem('omarvio_https_only');
-      return v !== null ? v === 'true' : true;
-    } catch {
-      return true;
-    }
-  });
   const [dntHeader, setDntHeader] = useState<boolean>(() => {
     try {
       const v = localStorage.getItem('omarvio_dnt_header');
@@ -340,6 +343,94 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
       return true;
     }
   });
+
+  // Core Adblocker Middleware, HTTPS-Only & Granular Block-Lists
+  const [privacyFilters, setPrivacyFilters] = useState<PrivacyFilterSettings>(getPrivacyFilterSettings);
+  const [adblockStats, setAdblockStats] = useState(getAdblockStats);
+
+  useEffect(() => {
+    const unsubFilters = subscribePrivacyFilterSettings(setPrivacyFilters);
+    const unsubStats = subscribeAdblockStats(setAdblockStats);
+    return () => {
+      unsubFilters();
+      unsubStats();
+    };
+  }, []);
+
+  const handleTogglePrivacyFilter = (
+    key: 'aggressiveTrackerBlocking' | 'adsFiltering' | 'httpsOnlyMode'
+  ) => {
+    const updated = setPrivacyFilterSettings({ [key]: !privacyFilters[key] });
+    setPrivacyFilters(updated);
+    syncPrivacyConfigWithAndroid(updated);
+    if (key === 'aggressiveTrackerBlocking') {
+      onToast(
+        updated.aggressiveTrackerBlocking
+          ? '🛡️ Aggressive Tracker Blocking enabled (tracking params & beacons cleaned)'
+          : 'Aggressive Tracker Blocking paused'
+      );
+    } else if (key === 'adsFiltering') {
+      onToast(
+        updated.adsFiltering
+          ? '🚫 Ads Filtering enabled (ad networks & popups blocked)'
+          : 'Ads Filtering paused'
+      );
+    } else {
+      onToast(
+        updated.httpsOnlyMode
+          ? '🔒 HTTPS-Only Mode enabled (insecure HTTP sites auto-upgrade with warning fallback)'
+          : 'HTTPS-Only Mode disabled'
+      );
+    }
+  };
+
+  const handleToggleBlockList = (listId: AdblockListId) => {
+    const currentVal = privacyFilters.enabledLists[listId] !== false;
+    const updated = setPrivacyFilterSettings({
+      enabledLists: { [listId]: !currentVal },
+    });
+    setPrivacyFilters(updated);
+    syncPrivacyConfigWithAndroid(updated);
+    const listMeta = ADBLOCK_FILTER_LISTS.find((l) => l.id === listId);
+    onToast(
+      updated.enabledLists[listId]
+        ? `✅ ${listMeta?.name || listId} সক্রিয় হয়েছে`
+        : `⏸️ ${listMeta?.name || listId} বন্ধ করা হয়েছে`
+    );
+  };
+
+  const handleApplyBlocklistPreset = (preset: 'strict' | 'balanced') => {
+    const nextLists: Record<AdblockListId, boolean> =
+      preset === 'strict'
+        ? {
+            easylist: true,
+            easyprivacy: true,
+            privacyBadger: true,
+            peterLowe: true,
+            malwarePhishing: true,
+            annoyances: true,
+          }
+        : {
+            easylist: true,
+            easyprivacy: false,
+            privacyBadger: true,
+            peterLowe: true,
+            malwarePhishing: true,
+            annoyances: false,
+          };
+    const updated = setPrivacyFilterSettings({
+      aggressiveTrackerBlocking: true,
+      adsFiltering: true,
+      enabledLists: nextLists,
+    });
+    setPrivacyFilters(updated);
+    syncPrivacyConfigWithAndroid(updated);
+    onToast(
+      preset === 'strict'
+        ? '🛡️ Strict All-Shields ফিল্টার লিস্ট চালু হয়েছে'
+        : '⚡ Balanced Genuine-Site মোড চালু হয়েছে'
+    );
+  };
 
   // Feedback Form State
   const [feedbackCategory, setFeedbackCategory] = useState<'bug' | 'feature' | 'ai' | 'speed' | 'general'>('feature');
@@ -1208,14 +1299,229 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
             </div>
           )}
 
-          {/* ==================== TAB 3: প্রাইভেসি ও নিরাপত্তা (PRIVACY & SHIELD) ==================== */}
+          {/* ==================== TAB 3: প্রাইভেসি ও নিরাপত্তা (PRIVACY SETTINGS) ==================== */}
           {activeTab === 'privacy' && (
-            <div className="space-y-3 animate-fadeIn">
-              <p className="text-xs text-slate-400 leading-relaxed">
-                আপনার ব্রাউজার স্যান্ডবক্সের ভেতর সমস্ত ট্র্যাকার ও নজরদারি ব্যবস্থা স্বয়ংক্রিয় প্রতিরোধ করা হয়। কোনো তথ্য সার্ভারে পাঠানো হয় না।
-              </p>
+            <div className="space-y-4 animate-fadeIn">
+              {/* Privacy Settings Header & Live Middleware Telemetry */}
+              <div className="p-3.5 rounded-2xl bg-gradient-to-br from-slate-900 via-[#0d162c] to-emerald-950/30 border border-cyan-500/30 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-xl bg-cyan-500/15 border border-cyan-400/30 flex items-center justify-center text-cyan-300 shrink-0">
+                      <ShieldCheck className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <h3 className="text-sm font-bold text-slate-100 truncate">
+                        Privacy Settings
+                      </h3>
+                      <p className="text-[11px] text-slate-400 leading-tight">
+                        Adblocker মিডলওয়্যার ব্রাউজার ফ্রেমে পৌঁছানোর আগেই রিকোয়েস্ট ক্লিন করে।
+                      </p>
+                    </div>
+                  </div>
+                  <span
+                    className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-md border shrink-0 ${
+                      privacyFilters.aggressiveTrackerBlocking || privacyFilters.adsFiltering
+                        ? 'bg-emerald-950/70 text-emerald-300 border-emerald-500/40'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}
+                  >
+                    {privacyFilters.aggressiveTrackerBlocking || privacyFilters.adsFiltering
+                      ? 'ACTIVE'
+                      : 'PAUSED'}
+                  </span>
+                </div>
 
+                {/* Live Shield Stats Grid */}
+                <div className="grid grid-cols-3 gap-2 pt-1">
+                  <div className="p-2 rounded-xl bg-slate-950/70 border border-slate-800/90 text-center">
+                    <p className="text-sm font-extrabold text-cyan-300 font-mono tabular-nums">
+                      {adblockStats.trackersBlocked}
+                    </p>
+                    <p className="text-[10px] text-slate-400">Trackers Blocked</p>
+                  </div>
+                  <div className="p-2 rounded-xl bg-slate-950/70 border border-slate-800/90 text-center">
+                    <p className="text-sm font-extrabold text-emerald-300 font-mono tabular-nums">
+                      {adblockStats.adsDestroyed}
+                    </p>
+                    <p className="text-[10px] text-slate-400">Ads Filtered</p>
+                  </div>
+                  <div className="p-2 rounded-xl bg-slate-950/70 border border-slate-800/90 text-center">
+                    <p className="text-sm font-extrabold text-blue-300 font-mono tabular-nums">
+                      {adblockStats.dataSavedMB} MB
+                    </p>
+                    <p className="text-[10px] text-slate-400">Data Saved</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Primary Adblocker Middleware Controls */}
               <div className="space-y-2">
+                <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block px-0.5">
+                  Network Adblocker Middleware
+                </label>
+
+                {/* Aggressive Tracker Blocking Toggle */}
+                <div className="flex items-center justify-between gap-3 p-3.5 rounded-2xl bg-slate-900/90 border border-slate-800 hover:border-cyan-500/30 transition-colors">
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                      <Shield className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                      <span>Aggressive Tracker Blocking</span>
+                    </p>
+                    <p className="text-[11px] text-slate-400 leading-snug mt-0.5">
+                      স্ট্রিক্ট ট্র্যাকার ব্লকিং: ব্রাউজার ফ্রেমে লোডের আগেই utm_*, fbclid, gclid ও টেলিমেট্রি স্ক্রিপ্ট মুছে ফেলে।
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={privacyFilters.aggressiveTrackerBlocking}
+                    aria-label="Aggressive Tracker Blocking"
+                    onClick={() => handleTogglePrivacyFilter('aggressiveTrackerBlocking')}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                      privacyFilters.aggressiveTrackerBlocking ? 'bg-cyan-500' : 'bg-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition duration-200 ${
+                        privacyFilters.aggressiveTrackerBlocking ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {/* Ads Filtering Toggle */}
+                <div className="flex items-center justify-between gap-3 p-3.5 rounded-2xl bg-slate-900/90 border border-slate-800 hover:border-emerald-500/30 transition-colors">
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                      <Zap className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span>Ads Filtering</span>
+                    </p>
+                    <p className="text-[11px] text-slate-400 leading-snug mt-0.5">
+                      বিজ্ঞাপন ফিল্টারিং: অ্যাড-নেটওয়ার্ক রিকোয়েস্ট, পপ-আপ ব্যানার ও ভিডিও বিজ্ঞাপন ফ্রেমে ঢোকার আগেই ব্লক করে।
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={privacyFilters.adsFiltering}
+                    aria-label="Ads Filtering"
+                    onClick={() => handleTogglePrivacyFilter('adsFiltering')}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                      privacyFilters.adsFiltering ? 'bg-emerald-500' : 'bg-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition duration-200 ${
+                        privacyFilters.adsFiltering ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {/* HTTPS-Only Mode Toggle */}
+                <div className="flex items-center justify-between gap-3 p-3.5 rounded-2xl bg-slate-900/90 border border-slate-800 hover:border-blue-500/30 transition-colors">
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                      <Lock className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                      <span>HTTPS-Only Mode</span>
+                    </p>
+                    <p className="text-[11px] text-slate-400 leading-snug mt-0.5">
+                      সকল অনিরাপদ HTTP সাইট স্বয়ংক্রিয়ভাবে HTTPS-এ আপগ্রেড করে এবং HTTPS না থাকলে সতর্কবার্তা স্ক্রিন দেখায়।
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={privacyFilters.httpsOnlyMode}
+                    aria-label="HTTPS-Only Mode"
+                    onClick={() => handleTogglePrivacyFilter('httpsOnlyMode')}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                      privacyFilters.httpsOnlyMode ? 'bg-blue-500' : 'bg-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition duration-200 ${
+                        privacyFilters.httpsOnlyMode ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              {/* Granular Adblocker Block-Lists Configuration */}
+              <div className="space-y-2 pt-1">
+                <div className="flex items-center justify-between px-0.5 gap-2">
+                  <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">
+                    Granular Adblock Lists ({Object.values(privacyFilters.enabledLists).filter(Boolean).length}/{ADBLOCK_FILTER_LISTS.length})
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleApplyBlocklistPreset('strict')}
+                      className="px-2 py-0.5 rounded-md bg-cyan-950 hover:bg-cyan-900 border border-cyan-500/40 text-[10px] font-bold text-cyan-300 cursor-pointer"
+                    >
+                      All Strict
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyBlocklistPreset('balanced')}
+                      className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] font-bold text-slate-300 cursor-pointer"
+                    >
+                      Balanced
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  {ADBLOCK_FILTER_LISTS.map((list) => {
+                    const isChecked = privacyFilters.enabledLists[list.id] !== false;
+                    return (
+                      <div
+                        key={list.id}
+                        className={`flex items-center justify-between gap-2.5 p-3 rounded-2xl border transition-colors ${
+                          isChecked
+                            ? 'bg-slate-900/90 border-cyan-500/30'
+                            : 'bg-slate-950/70 border-slate-800/80 opacity-80'
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <p className="text-xs font-bold text-slate-100">{list.name}</p>
+                            <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-slate-800 text-cyan-300 border border-slate-700">
+                              {list.badge} · {list.ruleCountLabel}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-slate-400 leading-snug mt-0.5">
+                            {list.descriptionBn}
+                          </p>
+                        </div>
+
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={isChecked}
+                          aria-label={list.name}
+                          onClick={() => handleToggleBlockList(list.id)}
+                          className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${
+                            isChecked ? 'bg-cyan-500' : 'bg-slate-700'
+                          }`}
+                        >
+                          <span
+                            className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                              isChecked ? 'translate-x-4' : 'translate-x-0'
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-2 pt-1">
+                <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block px-0.5">
+                  অতিরিক্ত শিল্ড ও সুরক্ষা (Additional Shields)
+                </label>
                 {/* Link Clinic */}
                 <div className="flex items-center justify-between p-3 rounded-2xl bg-slate-900/80 border border-slate-800">
                   <div className="min-w-0 pr-2">
@@ -1280,27 +1586,6 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                       setWebrtcShield(val);
                       try { localStorage.setItem('omarvio_webrtc_shield', String(val)); } catch {}
                       onToast(val ? '🛡️ WebRTC শিল্ড সক্রিয়' : 'WebRTC শিল্ড বন্ধ');
-                    }}
-                    className="w-4 h-4 accent-cyan-500 rounded cursor-pointer"
-                  />
-                </div>
-
-                {/* HTTPS-Only Enforcement */}
-                <div className="flex items-center justify-between p-3 rounded-2xl bg-slate-900/80 border border-slate-800">
-                  <div className="min-w-0 pr-2">
-                    <p className="text-xs font-bold text-slate-200">HTTPS-অনলি নিরাপদ কানেকশন</p>
-                    <p className="text-[10px] text-slate-400">
-                      যেকোনো অনিরাপদ HTTP পেজকে স্বয়ংক্রিয়ভাবে TLS 1.3 এনক্রিপ্টেড HTTPS-এ আপগ্রেড করে।
-                    </p>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={httpsOnly}
-                    onChange={(e) => {
-                      const val = e.target.checked;
-                      setHttpsOnly(val);
-                      try { localStorage.setItem('omarvio_https_only', String(val)); } catch {}
-                      onToast(val ? '🔒 HTTPS-অনলি সক্রিয়' : 'HTTPS-অনলি বন্ধ');
                     }}
                     className="w-4 h-4 accent-cyan-500 rounded cursor-pointer"
                   />

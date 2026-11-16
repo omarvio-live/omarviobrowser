@@ -7,7 +7,7 @@
  * Chromium WebView engine seamlessly with zero duplicate UI maintenance.
  */
 
-import { getSanitizedSearchUrl } from './adblocker';
+import { getSanitizedSearchUrl, PrivacyFilterSettings } from './adblocker';
 
 export interface OmarvioAndroidBridge {
   openUrl: (url: string, isIncognito?: boolean) => void;
@@ -16,6 +16,11 @@ export interface OmarvioAndroidBridge {
   setDesktopMode?: (enabled: boolean) => void;
   setAdBlockEnabled?: (enabled: boolean) => void;
   setBlockThirdPartyCookies?: (blocked: boolean) => void;
+  setHttpsOnly?: (enabled: boolean) => void;
+  setPrivacyConfig?: (jsonConfig: string) => void;
+  openDownloads?: () => void;
+  registerDownload?: (url: string, title: string, category?: string) => void;
+  checkAppUpdate?: () => void;
   openNativeSettings?: () => void;
   clearAllData?: () => void;
   getAppVersion?: () => string;
@@ -117,11 +122,55 @@ export function syncAdBlockWithAndroid(enabled: boolean): void {
   } catch {}
 }
 
+export function syncPrivacyConfigWithAndroid(settings: PrivacyFilterSettings): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.OmarvioAndroid?.setAdBlockEnabled?.(
+      settings.aggressiveTrackerBlocking || settings.adsFiltering
+    );
+    window.OmarvioAndroid?.setHttpsOnly?.(settings.httpsOnlyMode);
+    window.OmarvioAndroid?.setPrivacyConfig?.(JSON.stringify(settings));
+  } catch {}
+}
+
 export function syncThirdPartyCookieBlockWithAndroid(blocked: boolean): void {
   if (typeof window === 'undefined') return;
   try {
     window.OmarvioAndroid?.setBlockThirdPartyCookies?.(blocked);
   } catch {}
+}
+
+export function openAndroidDownloadsHub(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    if (typeof window.OmarvioAndroid?.openDownloads === 'function') {
+      window.OmarvioAndroid.openDownloads();
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+export function registerDownloadInAndroid(url: string, title: string, category = 'doc'): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    if (typeof window.OmarvioAndroid?.registerDownload === 'function') {
+      window.OmarvioAndroid.registerDownload(url, title, category);
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+export function triggerAndroidAppUpdateCheck(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    if (typeof window.OmarvioAndroid?.checkAppUpdate === 'function') {
+      window.OmarvioAndroid.checkAppUpdate();
+      return true;
+    }
+  } catch {}
+  return false;
 }
 
 export function openNativeAndroidSettings(): boolean {

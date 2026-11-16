@@ -14,15 +14,17 @@ import android.webkit.WebViewClient
 
 /**
  * OMARVIO BROWSER - Native Chromium WebView Client
- * Delivers 0ms direct network loading, ad & tracker interception, HTTPS-Only upgrades,
- * tracking parameter stripping, cosmetic ad suppression, and in-app navigation containment.
+ * Delivers 0ms direct network loading, granular ad & tracker interception,
+ * HTTPS-Only upgrade + explicit TLS warning screen, redirect unwrapping,
+ * cosmetic ad suppression, and in-app navigation containment.
  */
 class OmarVioWebViewClient(
     private val context: Context,
     private val onPageTitleChanged: (String) -> Unit,
     private val onUrlChanged: (String) -> Unit,
     private val onLoadingStateChanged: (Boolean) -> Unit,
-    private val onBackNavigationChanged: ((canGoBack: Boolean, canGoForward: Boolean) -> Unit)? = null
+    private val onBackNavigationChanged: ((canGoBack: Boolean, canGoForward: Boolean) -> Unit)? = null,
+    private val onHttpsOnlyWarning: ((httpUrl: String, httpsUrl: String, reason: String) -> Unit)? = null
 ) : WebViewClient() {
 
     override fun shouldInterceptRequest(
@@ -54,10 +56,12 @@ class OmarVioWebViewClient(
                 val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
                 val fallbackUrl = intent.getStringExtra("browser_fallback_url")
                 if (!fallbackUrl.isNullOrEmpty() && (fallbackUrl.startsWith("http://") || fallbackUrl.startsWith("https://"))) {
-                    view?.loadUrl(AdBlockEngine.stripTrackingParameters(fallbackUrl))
+                    val unwrapped = AdBlockEngine.unwrapRedirectUrl(fallbackUrl)
+                    view?.loadUrl(unwrapped)
                     return true
                 }
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            }
             return true
         }
 
@@ -73,49 +77,47 @@ class OmarVioWebViewClient(
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
                 context.startActivity(intent)
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            }
             return true
         }
 
-        // 4a. Auto-unwrap DuckDuckGo and Google intermediate redirect traps
-        if (url.contains("duckduckgo.com/l/?") || url.contains("uddg=")) {
-            try {
-                val uri = Uri.parse(url)
-                val target = uri.getQueryParameter("uddg")
-                if (!target.isNullOrEmpty() && (target.startsWith("http://") || target.startsWith("https://"))) {
-                    view?.loadUrl(AdBlockEngine.stripTrackingParameters(target))
-                    return true
-                }
-            } catch (_: Exception) {}
-        }
-        if (url.contains("google.") && (url.contains("/url?q=") || url.contains("/url?url="))) {
-            try {
-                val uri = Uri.parse(url)
-                val target = uri.getQueryParameter("q") ?: uri.getQueryParameter("url")
-                if (!target.isNullOrEmpty() && (target.startsWith("http://") || target.startsWith("https://"))) {
-                    view?.loadUrl(AdBlockEngine.stripTrackingParameters(target))
-                    return true
-                }
-            } catch (_: Exception) {}
+        // 4. Unwrap Facebook / WhatsApp / Google / DuckDuckGo / YouTube tracking redirect traps
+        val unwrapped = AdBlockEngine.unwrapRedirectUrl(url)
+        if (AdBlockEngine.isMalwareUrl(unwrapped)) {
+            return true
         }
 
-        // 4b. HTTPS-Only upgrade & tracking query parameter sanitization
-        if (url.startsWith("http://") && AdBlockEngine.httpsOnlyEnabled) {
-            val upgraded = "https://" + AdBlockEngine.stripTrackingParameters(url).removePrefix("http://")
+        if (unwrapped != url && (unwrapped.startsWith("http://") || unwrapped.startsWith("https://"))) {
+            val finalUrl = maybeUpgradeHttps(unwrapped)
+            view?.loadUrl(finalUrl)
+            return true
+        }
+
+        // 5. HTTPS-Only Mode upgrade for insecure http:// links (unless explicitly allowed for this host)
+        if (url.startsWith("http://") && AdBlockEngine.httpsOnlyEnabled && !AdBlockEngine.isHttpAllowedForHost(url)) {
+            val upgraded = "https://" + url.removePrefix("http://")
             view?.loadUrl(upgraded)
             return true
         }
 
         if (url.startsWith("http://") || url.startsWith("https://")) {
-            val stripped = AdBlockEngine.stripTrackingParameters(url)
-            if (stripped != url) {
-                view?.loadUrl(stripped)
-                return true
-            }
             return false
         }
 
         return true
+    }
+
+    private fun maybeUpgradeHttps(target: String): String {
+        return if (
+            target.startsWith("http://") &&
+            AdBlockEngine.httpsOnlyEnabled &&
+            !AdBlockEngine.isHttpAllowedForHost(target)
+        ) {
+            "https://" + target.removePrefix("http://")
+        } else {
+            target
+        }
     }
 
     override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
@@ -134,7 +136,19 @@ class OmarVioWebViewClient(
         handler: SslErrorHandler?,
         error: SslError?
     ) {
-        handler?.proceed()
+        handler?.cancel()
+        val failedUrl = error?.url ?: view?.url ?: return
+        onLoadingStateChanged(false)
+        val httpsUrl = if (failedUrl.startsWith("https://")) failedUrl else "https://" + failedUrl.removePrefix("http://")
+        val httpUrl = "http://" + httpsUrl.removePrefix("https://")
+        view?.post {
+            view.stopLoading()
+            onHttpsOnlyWarning?.invoke(
+                httpUrl,
+                httpsUrl,
+                "এই ওয়েবসাইটের SSL/TLS সার্টিফিকেট যাচাই করা যায়নি বা এনক্রিপশন নিরাপদ নয়।"
+            )
+        }
     }
 
     override fun onReceivedError(
@@ -145,6 +159,25 @@ class OmarVioWebViewClient(
         super.onReceivedError(view, request, error)
         if (request?.isForMainFrame == true) {
             onLoadingStateChanged(false)
+            val failedUrl = request.url?.toString() ?: return
+            val code = error?.errorCode ?: 0
+            val isTlsOrConnFailure = code == ERROR_FAILED_SSL_HANDSHAKE ||
+                code == ERROR_CONNECT ||
+                code == ERROR_TIMEOUT
+            if (AdBlockEngine.httpsOnlyEnabled &&
+                failedUrl.startsWith("https://") &&
+                isTlsOrConnFailure &&
+                !AdBlockEngine.isHttpAllowedForHost(failedUrl)
+            ) {
+                val httpUrl = "http://" + failedUrl.removePrefix("https://")
+                view?.post {
+                    onHttpsOnlyWarning?.invoke(
+                        httpUrl,
+                        failedUrl,
+                        "HTTPS সংযোগ ব্যর্থ হয়েছে (${error?.description ?: "TLS Unavailable"})। সাইটটি নিরাপদ HTTPS সমর্থন নাও করতে পারে।"
+                    )
+                }
+            }
         }
     }
 
@@ -180,33 +213,44 @@ class OmarVioWebViewClient(
             )
         }
 
-        if (AdBlockEngine.adBlockEnabled) {
+        val css = AdBlockEngine.cosmeticSuppressionCss()
+        if (AdBlockEngine.adBlockEnabled && css.isNotEmpty()) {
+            val escapedCss = css.replace("'", "\\'")
+            val autoSkipBlock = if (AdBlockEngine.easyListEnabled) {
+                """
+                if (!window.__omarvioAdSkipInstalled) {
+                    window.__omarvioAdSkipInstalled = true;
+                    setInterval(function() {
+                        if (document.hidden) return;
+                        try {
+                            var skip = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
+                            if (skip) skip.click();
+                            var v = document.querySelector('video');
+                            var isAd = document.querySelector('.ad-showing, .ytp-ad-player-overlay');
+                            if (v && isAd && !isNaN(v.duration) && v.duration > 0) {
+                                v.currentTime = v.duration - 0.1;
+                                v.playbackRate = 16.0;
+                                v.muted = true;
+                            }
+                        } catch(e) {}
+                    }, 800);
+                }
+                """.trimIndent()
+            } else ""
+
             val shieldInject = """
                 (function() {
                     try {
-                        if (document.head && !document.getElementById('omarvio-adblock-css')) {
-                            var style = document.createElement('style');
-                            style.id = 'omarvio-adblock-css';
-                            style.textContent = '.ytp-ad-module, .ytp-ad-player-overlay, .ytp-ad-text, .video-ads, .ad-container, .ad-interrupting, .fb-ad, .sponsored_ad, .ad-banner, .interstitial-ad, .overlay-ad, ins.adsbygoogle, div[id*="google_ads"], div[id*="taboola"], div[id*="outbrain"], div[class*="ad-box"], div[class*="ad-slot"], div[class*="ad-wrapper"], div[class*="popup-banner"], div[id*="cookie-banner"], div[class*="consent-modal"], div[id*="onetrust-consent-sdk"] { display: none !important; visibility: hidden !important; height: 0 !important; width: 0 !important; opacity: 0 !important; pointer-events: none !important; }';
-                            document.head.appendChild(style);
+                        if (document.head) {
+                            var existing = document.getElementById('omarvio-adblock-css');
+                            if (!existing) {
+                                existing = document.createElement('style');
+                                existing.id = 'omarvio-adblock-css';
+                                document.head.appendChild(existing);
+                            }
+                            existing.textContent = '$escapedCss';
                         }
-                        if (!window.__omarvioAdSkipInstalled) {
-                            window.__omarvioAdSkipInstalled = true;
-                            setInterval(function() {
-                                if (document.hidden) return;
-                                try {
-                                    var skip = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
-                                    if (skip) skip.click();
-                                    var v = document.querySelector('video');
-                                    var isAd = document.querySelector('.ad-showing, .ytp-ad-player-overlay');
-                                    if (v && isAd && !isNaN(v.duration) && v.duration > 0) {
-                                        v.currentTime = v.duration - 0.1;
-                                        v.playbackRate = 16.0;
-                                        v.muted = true;
-                                    }
-                                } catch(e) {}
-                            }, 800);
-                        }
+                        $autoSkipBlock
                     } catch(e) {}
                 })();
             """.trimIndent()

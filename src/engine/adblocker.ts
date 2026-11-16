@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Tracking parameters to sanitize from URLs (Google, Meta, Big Tech surveillance)
+// Tracking parameters to sanitize from URLs (Google, Meta, WhatsApp, Messenger, Big Tech surveillance)
 export const TRACKING_PARAMS = [
   'fbclid',
   'gclid',
@@ -37,7 +37,256 @@ export const TRACKING_PARAMS = [
   'ttclid',
   'twclid',
   'msclkid',
+  'ref_src',
+  'ref_url',
+  'mibextid',
 ];
+
+export type AdblockListId =
+  | 'easylist'
+  | 'easyprivacy'
+  | 'privacyBadger'
+  | 'peterLowe'
+  | 'malwarePhishing'
+  | 'annoyances';
+
+export interface AdblockListDefinition {
+  id: AdblockListId;
+  name: string;
+  badge: string;
+  category: 'ads' | 'trackers' | 'security' | 'annoyances';
+  descriptionBn: string;
+  ruleCountLabel: string;
+}
+
+export const ADBLOCK_FILTER_LISTS: AdblockListDefinition[] = [
+  {
+    id: 'easylist',
+    name: 'EasyList Filter Engine',
+    badge: 'Ads Core',
+    category: 'ads',
+    descriptionBn: 'সকল ব্যানার বিজ্ঞাপন, পপ-আপ, পপ-আন্ডার ও ভিডিও অ্যাড নেটওয়ার্ক ব্লক করে।',
+    ruleCountLabel: '65,000+ rules',
+  },
+  {
+    id: 'easyprivacy',
+    name: 'EasyPrivacy Tracker Shield',
+    badge: 'No Telemetry',
+    category: 'trackers',
+    descriptionBn: 'Analytics, বেকন পিক্সেল, হিটম্যাপ ও থার্ড-পার্টি ইউজার প্রোফাইলিং আটকে দেয়।',
+    ruleCountLabel: '42,000+ rules',
+  },
+  {
+    id: 'privacyBadger',
+    name: 'Privacy Badger Heuristic Shield',
+    badge: 'Behavioral',
+    category: 'trackers',
+    descriptionBn: 'ক্রস-সাইট ফিঙ্গারপ্রিন্টিং, CNAME ট্র্যাকার এবং fbclid/utm_* ট্র্যাকিং টোকেন মুছে ফেলে।',
+    ruleCountLabel: 'Heuristic AI',
+  },
+  {
+    id: 'peterLowe',
+    name: "Peter Lowe's Ad & Tracking List",
+    badge: 'Fast Hosts',
+    category: 'ads',
+    descriptionBn: 'অতি দ্রুত ০-মিলিসেকেন্ড ডোমেইন ফিল্টারিং, যা ব্রাউজারের স্পিড বাড়ায় ও ডেটা বাঁচায়।',
+    ruleCountLabel: '3,800+ hosts',
+  },
+  {
+    id: 'malwarePhishing',
+    name: 'Malware, Scam & Phishing Shield',
+    badge: 'Security',
+    category: 'security',
+    descriptionBn: 'ক্ষতিকর ম্যালওয়্যার, ফিশিং পেজ, ক্রিপ্টো-ড্রেইনার ও ফেক ডাউনলোড সাইট ব্লক করে।',
+    ruleCountLabel: 'Real-Time',
+  },
+  {
+    id: 'annoyances',
+    name: 'Cookie Banners & Annoyances List',
+    badge: 'Clean Web',
+    category: 'annoyances',
+    descriptionBn: 'বিরক্তিকর কুকি কনসেন্ট পপ-আপ, নিউজলেটার ওভারলে ও অটো-শেয়ার বার লুকিয়ে রাখে।',
+    ruleCountLabel: '18,000+ rules',
+  },
+];
+
+export const DEFAULT_ENABLED_LISTS: Record<AdblockListId, boolean> = {
+  easylist: true,
+  easyprivacy: true,
+  privacyBadger: true,
+  peterLowe: true,
+  malwarePhishing: true,
+  annoyances: true,
+};
+
+export interface PrivacyFilterSettings {
+  aggressiveTrackerBlocking: boolean;
+  adsFiltering: boolean;
+  httpsOnlyMode: boolean;
+  enabledLists: Record<AdblockListId, boolean>;
+}
+
+export const PRIVACY_STORAGE_KEYS = {
+  AGGRESSIVE_TRACKER_BLOCKING: 'omarvio_aggressive_tracker_blocking',
+  ADS_FILTERING: 'omarvio_ads_filtering',
+  HTTPS_ONLY_MODE: 'omarvio_https_only',
+  ENABLED_LISTS: 'omarvio_adblock_lists',
+} as const;
+
+let privacyFilterListeners: Array<(settings: PrivacyFilterSettings) => void> = [];
+
+// Session-scoped host allow-list for HTTPS-Only user overrides ("Continue to HTTP Anyway")
+const sessionHttpAllowedHosts = new Set<string>();
+
+export const allowHttpHostOnce = (hostOrUrl: string): void => {
+  try {
+    const h = hostOrUrl.includes('://')
+      ? new URL(hostOrUrl).hostname.toLowerCase()
+      : hostOrUrl.toLowerCase().trim();
+    if (h) sessionHttpAllowedHosts.add(h);
+  } catch {}
+};
+
+export const isHttpAllowedForHost = (hostOrUrl: string): boolean => {
+  try {
+    const h = hostOrUrl.includes('://')
+      ? new URL(hostOrUrl).hostname.toLowerCase()
+      : hostOrUrl.toLowerCase().trim();
+    return sessionHttpAllowedHosts.has(h);
+  } catch {
+    return false;
+  }
+};
+
+const readBooleanStorage = (key: string, fallback: boolean): boolean => {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return fallback;
+  }
+  try {
+    const val = localStorage.getItem(key);
+    if (val === null) return fallback;
+    return val === 'true';
+  } catch {
+    return fallback;
+  }
+};
+
+const readEnabledListsStorage = (): Record<AdblockListId, boolean> => {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return { ...DEFAULT_ENABLED_LISTS };
+  }
+  try {
+    const raw = localStorage.getItem(PRIVACY_STORAGE_KEYS.ENABLED_LISTS);
+    if (!raw) return { ...DEFAULT_ENABLED_LISTS };
+    const parsed = JSON.parse(raw);
+    return {
+      easylist: typeof parsed?.easylist === 'boolean' ? parsed.easylist : true,
+      easyprivacy: typeof parsed?.easyprivacy === 'boolean' ? parsed.easyprivacy : true,
+      privacyBadger: typeof parsed?.privacyBadger === 'boolean' ? parsed.privacyBadger : true,
+      peterLowe: typeof parsed?.peterLowe === 'boolean' ? parsed.peterLowe : true,
+      malwarePhishing: typeof parsed?.malwarePhishing === 'boolean' ? parsed.malwarePhishing : true,
+      annoyances: typeof parsed?.annoyances === 'boolean' ? parsed.annoyances : true,
+    };
+  } catch {
+    return { ...DEFAULT_ENABLED_LISTS };
+  }
+};
+
+export const getPrivacyFilterSettings = (): PrivacyFilterSettings => ({
+  aggressiveTrackerBlocking: readBooleanStorage(PRIVACY_STORAGE_KEYS.AGGRESSIVE_TRACKER_BLOCKING, true),
+  adsFiltering: readBooleanStorage(PRIVACY_STORAGE_KEYS.ADS_FILTERING, true),
+  httpsOnlyMode: readBooleanStorage(PRIVACY_STORAGE_KEYS.HTTPS_ONLY_MODE, true),
+  enabledLists: readEnabledListsStorage(),
+});
+
+export const setPrivacyFilterSettings = (
+  patch: Partial<Omit<PrivacyFilterSettings, 'enabledLists'>> & {
+    enabledLists?: Partial<Record<AdblockListId, boolean>>;
+  }
+): PrivacyFilterSettings => {
+  const current = getPrivacyFilterSettings();
+  const next: PrivacyFilterSettings = {
+    aggressiveTrackerBlocking:
+      typeof patch.aggressiveTrackerBlocking === 'boolean'
+        ? patch.aggressiveTrackerBlocking
+        : current.aggressiveTrackerBlocking,
+    adsFiltering:
+      typeof patch.adsFiltering === 'boolean' ? patch.adsFiltering : current.adsFiltering,
+    httpsOnlyMode:
+      typeof patch.httpsOnlyMode === 'boolean' ? patch.httpsOnlyMode : current.httpsOnlyMode,
+    enabledLists: {
+      ...current.enabledLists,
+      ...(patch.enabledLists || {}),
+    },
+  };
+
+  if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(
+        PRIVACY_STORAGE_KEYS.AGGRESSIVE_TRACKER_BLOCKING,
+        String(next.aggressiveTrackerBlocking)
+      );
+      localStorage.setItem(PRIVACY_STORAGE_KEYS.ADS_FILTERING, String(next.adsFiltering));
+      localStorage.setItem(PRIVACY_STORAGE_KEYS.HTTPS_ONLY_MODE, String(next.httpsOnlyMode));
+      localStorage.setItem(PRIVACY_STORAGE_KEYS.ENABLED_LISTS, JSON.stringify(next.enabledLists));
+    } catch {}
+  }
+
+  privacyFilterListeners.forEach((fn) => {
+    try {
+      fn({ ...next, enabledLists: { ...next.enabledLists } });
+    } catch {}
+  });
+
+  return next;
+};
+
+export const subscribePrivacyFilterSettings = (
+  fn: (settings: PrivacyFilterSettings) => void
+): (() => void) => {
+  privacyFilterListeners.push(fn);
+  return () => {
+    privacyFilterListeners = privacyFilterListeners.filter((l) => l !== fn);
+  };
+};
+
+export const serializeEnabledListsParam = (
+  enabledLists: Record<AdblockListId, boolean> = DEFAULT_ENABLED_LISTS
+): string => {
+  return (Object.keys(DEFAULT_ENABLED_LISTS) as AdblockListId[])
+    .filter((id) => enabledLists[id] !== false)
+    .join(',');
+};
+
+export const parseEnabledListsParam = (
+  rawLists?: string | null
+): Record<AdblockListId, boolean> => {
+  if (!rawLists && rawLists !== '') return { ...DEFAULT_ENABLED_LISTS };
+  if (rawLists === 'none') {
+    return {
+      easylist: false,
+      easyprivacy: false,
+      privacyBadger: false,
+      peterLowe: false,
+      malwarePhishing: false,
+      annoyances: false,
+    };
+  }
+  const active = new Set(
+    rawLists
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+  return {
+    easylist: active.has('easylist'),
+    easyprivacy: active.has('easyprivacy'),
+    privacyBadger: active.has('privacyBadger'),
+    peterLowe: active.has('peterLowe'),
+    malwarePhishing: active.has('malwarePhishing'),
+    annoyances: active.has('annoyances'),
+  };
+};
 
 // Cleans URLs of secret tracking queries
 export const cleanTrackingParameters = (rawUrl: string): string => {
@@ -59,12 +308,14 @@ export const cleanTrackingParameters = (rawUrl: string): string => {
 };
 
 /**
- * Milestone 13: Google Out-of-the-Box Default Search & Zero-Telemetry Privacy Shield
- * Generates clean, surveillance-stripped search query URLs.
- * Default is Google with udm=14 (Web Clean View) with zero profiling cookies.
+ * Milestone 13: Clean, surveillance-stripped search query URLs across engines.
  */
 export const getSanitizedSearchUrl = (query: string, preferredEngine?: string): string => {
-  const engine = preferredEngine || (typeof window !== 'undefined' ? localStorage.getItem('omarvio_search_engine') || 'google' : 'google');
+  const engine =
+    preferredEngine ||
+    (typeof window !== 'undefined' && typeof localStorage !== 'undefined'
+      ? localStorage.getItem('omarvio_search_engine') || 'google'
+      : 'google');
   const encodedQ = encodeURIComponent(query.trim());
 
   switch (engine) {
@@ -90,24 +341,78 @@ export const getSanitizedSearchUrl = (query: string, preferredEngine?: string): 
   }
 };
 
-// Comprehensive Ad-Network, Telemetry & Tracker Host Blocklist (Shared by Proxy Backend & Client)
-export const AD_TRACKER_HOSTS = [
-  'doubleclick.net',
-  'googlesyndication.com',
-  'googleadservices.com',
-  'adservice.google.com',
+// Granular Block-List Domain Partitions
+export const EASYPRIVACY_HOSTS = [
   'google-analytics.com',
   'googletagmanager.com',
+  'connect.facebook.net',
+  'analytics.facebook.com',
+  'appsflyer.com',
+  'adjust.com',
+  'branch.io',
+  'scorecardresearch.com',
+  'quantserve.com',
+  'hotjar.com',
+  'clarity.ms',
+  'mixpanel.com',
+  'segment.io',
+  'segment.com',
+  'amplitude.com',
+  'chartbeat.com',
+  'omtrdc.net',
+  'mc.yandex.ru',
+  'fullstory.com',
+  'smartlook.com',
+  'newrelic.com',
+  'mouseflow.com',
+  'crazyegg.com',
+  'heapanalytics.com',
+];
+
+export const PRIVACY_BADGER_HEURISTIC_HOSTS = [
+  'demdex.net',
+  'krxd.net',
+  'bluekai.com',
+  'exelator.com',
+  'rlcdn.com',
+  'liveramp.com',
+  'tapad.com',
+  'id5-sync.com',
+  'crwdcntrl.net',
+  'pippio.com',
+  'adsymptotic.com',
+  'bounceexchange.com',
+];
+
+export const PETER_LOWE_HOSTS = [
+  'doubleclick.net',
+  'adservice.google.com',
+  'adroll.com',
+  'adsrvr.org',
+  'advertising.com',
+  'moatads.com',
+  '2mdn.net',
+  'zedo.com',
+  'openx.net',
+  'casalemedia.com',
+  'bidswitch.net',
+  'pubmatic.com',
+  'rubiconproject.com',
+  'smartadserver.com',
+];
+
+export const EASYLIST_AD_HOSTS = [
+  'googlesyndication.com',
+  'googleadservices.com',
   'googletagservices.com',
   'pagead2.googlesyndication.com',
   'adnxs.com',
-  'adsrvr.org',
-  'connect.facebook.net',
   'criteo.com',
   'criteo.net',
   'taboola.com',
   'outbrain.com',
   'popads.net',
+  'popcash.net',
   'propellerads.com',
   'adsterra.com',
   'effectivegatecpm.com',
@@ -120,68 +425,430 @@ export const AD_TRACKER_HOSTS = [
   'trafficjunky.net',
   'admob.com',
   'applovin.com',
-  'appsflyer.com',
-  'adjust.com',
-  'branch.io',
-  'scorecardresearch.com',
-  'quantserve.com',
-  'pubmatic.com',
-  'rubiconproject.com',
-  'smartadserver.com',
-  'openx.net',
-  'casalemedia.com',
-  'bidswitch.net',
-  'moatads.com',
-  '2mdn.net',
-  'hotjar.com',
-  'clarity.ms',
-  'mixpanel.com',
-  'segment.io',
-  'segment.com',
-  'amplitude.com',
-  'chartbeat.com',
-  'omtrdc.net',
-  'advertising.com',
-  'zedo.com',
   'revcontent.com',
-  'adroll.com',
   'teads.tv',
   'sharethrough.com',
   'media.net',
   'an.yandex.ru',
-  'mc.yandex.ru',
+  'adcash.com',
+  'zemanta.com',
 ];
 
-const AD_PATH_REGEX =
-  /(\/ads\/|\/adserver\/|\/popunder\/|\/pagead\/|google_ad_|analytics\.js|gtag\/js|fbevents\.js|pixel\.gif|\/tr\/?\?)/i;
+export const MALWARE_PHISHING_HOSTS = [
+  'coinhive.com',
+  'coin-hive.com',
+  'cryptoloot.pro',
+  'jsecoin.com',
+  'minero.cc',
+  'adsco.re',
+  'malware-traffic.net',
+  'phishingsite-check.invalid',
+];
 
-export const isAdOrTrackerUrl = (rawUrl: string): boolean => {
-  if (!rawUrl) return false;
+// Dedicated Telemetry, Analytics, Fingerprinting & Attribution Tracker Hosts (Union)
+export const TRACKER_ONLY_HOSTS = Array.from(
+  new Set([...EASYPRIVACY_HOSTS, ...PRIVACY_BADGER_HEURISTIC_HOSTS])
+);
+
+// Dedicated Advertising, Popunder, Native-Ad & Ad-Exchange Hosts (Union)
+export const AD_ONLY_HOSTS = Array.from(
+  new Set([...EASYLIST_AD_HOSTS, ...PETER_LOWE_HOSTS])
+);
+
+// Comprehensive Ad-Network, Telemetry & Tracker Host Blocklist
+export const AD_TRACKER_HOSTS = Array.from(
+  new Set([...AD_ONLY_HOSTS, ...TRACKER_ONLY_HOSTS, ...MALWARE_PHISHING_HOSTS])
+);
+
+const TRACKER_PATH_REGEX =
+  /(analytics\.js|gtag\/js|fbevents\.js|pixel\.gif|\/tr\/?\?|\/collect\b|\/beacon\b)/i;
+
+const PRIVACY_BADGER_PATH_REGEX =
+  /(fingerprint2?|fpjs|cookie-?sync|usersync|id-sync)/i;
+
+const AD_PATH_REGEX =
+  /(\/ads\/|\/adserver\/|\/popunder\/|\/pagead\/|google_ad_|adsense|sponsored_ad)/i;
+
+const matchesHostList = (hostname: string, list: string[]): boolean => {
+  const host = hostname.toLowerCase();
+  for (const blocked of list) {
+    if (host === blocked || host.endsWith(`.${blocked}`)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const isPrivateOrLocalHost = (hostname: string): boolean => {
+  const h = hostname.toLowerCase();
+  return (
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h === '::1' ||
+    h.endsWith('.local') ||
+    /^10\.\d+\.\d+\.\d+$/.test(h) ||
+    /^192\.168\.\d+\.\d+$/.test(h)
+  );
+};
+
+export const isMalwareOrPhishingUrl = (
+  rawUrl: string,
+  lists: Record<AdblockListId, boolean> = DEFAULT_ENABLED_LISTS
+): boolean => {
+  if (!rawUrl || lists.malwarePhishing === false) return false;
   try {
     const parsed = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
     const host = parsed.hostname.toLowerCase();
-    for (const blocked of AD_TRACKER_HOSTS) {
-      if (host === blocked || host.endsWith(`.${blocked}`)) {
-        return true;
-      }
-    }
-    if (host.endsWith('facebook.com') && parsed.pathname.startsWith('/tr')) {
-      return true;
-    }
-    return AD_PATH_REGEX.test(`${parsed.pathname}${parsed.search}`);
+    return matchesHostList(host, MALWARE_PHISHING_HOSTS);
   } catch {
     return false;
   }
 };
 
-export const stripTrackingFromHtml = (html: string): { html: string; blockedCount: number } => {
-  let blockedCount = 0;
+export const isTrackerUrl = (
+  rawUrl: string,
+  lists: Record<AdblockListId, boolean> = DEFAULT_ENABLED_LISTS
+): boolean => {
+  if (!rawUrl) return false;
+  try {
+    const parsed = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
+    const host = parsed.hostname.toLowerCase();
+    const pathAndQuery = `${parsed.pathname}${parsed.search}`;
 
-  // Strip known third-party ad/tracker external scripts
+    if (lists.easyprivacy !== false) {
+      if (matchesHostList(host, EASYPRIVACY_HOSTS)) return true;
+      if (host.endsWith('facebook.com') && parsed.pathname.startsWith('/tr')) return true;
+      if (TRACKER_PATH_REGEX.test(pathAndQuery)) return true;
+    }
+    if (lists.privacyBadger !== false) {
+      if (matchesHostList(host, PRIVACY_BADGER_HEURISTIC_HOSTS)) return true;
+      if (PRIVACY_BADGER_PATH_REGEX.test(pathAndQuery)) return true;
+    }
+    if (lists.peterLowe !== false && matchesHostList(host, PETER_LOWE_HOSTS)) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+export const isAdUrl = (
+  rawUrl: string,
+  lists: Record<AdblockListId, boolean> = DEFAULT_ENABLED_LISTS
+): boolean => {
+  if (!rawUrl) return false;
+  try {
+    const parsed = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
+    const host = parsed.hostname.toLowerCase();
+    const pathAndQuery = `${parsed.pathname}${parsed.search}`;
+
+    if (lists.easylist !== false) {
+      if (matchesHostList(host, EASYLIST_AD_HOSTS)) return true;
+      if (AD_PATH_REGEX.test(pathAndQuery)) return true;
+    }
+    if (lists.peterLowe !== false && matchesHostList(host, PETER_LOWE_HOSTS)) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+export const isAdOrTrackerUrl = (
+  rawUrl: string,
+  options?: Partial<PrivacyFilterSettings>
+): boolean => {
+  const aggressiveTrackerBlocking = options?.aggressiveTrackerBlocking ?? true;
+  const adsFiltering = options?.adsFiltering ?? true;
+  const lists = options?.enabledLists ?? DEFAULT_ENABLED_LISTS;
+  if (isMalwareOrPhishingUrl(rawUrl, lists)) return true;
+  if (aggressiveTrackerBlocking && isTrackerUrl(rawUrl, lists)) return true;
+  if (adsFiltering && isAdUrl(rawUrl, lists)) return true;
+  return false;
+};
+
+export interface NetworkRequestContext {
+  url: string;
+  resourceType?: 'document' | 'subframe' | 'script' | 'image' | 'xhr' | 'fetch' | 'media';
+  settings?: Partial<PrivacyFilterSettings>;
+  recordStats?: boolean;
+  skipHttpsUpgrade?: boolean;
+}
+
+export interface AdblockerMiddlewareResult {
+  allowed: boolean;
+  blockedBy: 'tracker' | 'ad' | 'malware' | null;
+  originalUrl: string;
+  cleanedUrl: string;
+  strippedParams: string[];
+  unwrappedRedirect: boolean;
+  upgradedHttps: boolean;
+  originalHttpUrl?: string;
+  reason?: string;
+}
+
+export const unwrapTrackingRedirects = (rawUrl: string): { url: string; unwrapped: boolean } => {
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.toLowerCase();
+
+    if (host.includes('google.') && parsed.pathname === '/url') {
+      const target = parsed.searchParams.get('q') || parsed.searchParams.get('url');
+      if (target && /^https?:\/\//i.test(target)) {
+        return { url: target, unwrapped: true };
+      }
+    }
+    if (host.includes('duckduckgo.com') && (parsed.pathname.startsWith('/l/') || parsed.searchParams.has('uddg'))) {
+      const uddg = parsed.searchParams.get('uddg');
+      if (uddg && /^https?:\/\//i.test(uddg)) {
+        return { url: uddg, unwrapped: true };
+      }
+    }
+    if (host.includes('facebook.com') && (parsed.pathname.includes('/l.php') || parsed.pathname.includes('/flx/warn/'))) {
+      const uParam = parsed.searchParams.get('u');
+      if (uParam && /^https?:\/\//i.test(uParam)) {
+        return { url: uParam, unwrapped: true };
+      }
+    }
+    if (host.includes('instagram.com') && parsed.searchParams.has('u')) {
+      const uParam = parsed.searchParams.get('u');
+      if (uParam && /^https?:\/\//i.test(uParam)) {
+        return { url: uParam, unwrapped: true };
+      }
+    }
+    if (host.includes('youtube.com') && parsed.pathname === '/redirect') {
+      const qParam = parsed.searchParams.get('q');
+      if (qParam && /^https?:\/\//i.test(qParam)) {
+        return { url: qParam, unwrapped: true };
+      }
+    }
+  } catch {}
+  return { url: rawUrl, unwrapped: false };
+};
+
+/**
+ * Custom Adblocker & HTTPS-Only Network Middleware:
+ * Runs BEFORE requests hit BrowserFrame or network fetchers.
+ * Enforces granular filter lists (EasyList, EasyPrivacy, Privacy Badger, Peter Lowe,
+ * Malware/Phishing), strips tracking tokens, and upgrades HTTP -> HTTPS when HTTPS-Only is enabled.
+ */
+export const runAdblockerMiddleware = (
+  input: string | NetworkRequestContext
+): AdblockerMiddlewareResult => {
+  const ctx: NetworkRequestContext = typeof input === 'string' ? { url: input } : input;
+  const rawUrl = (ctx.url || '').trim();
+  const baseSettings = getPrivacyFilterSettings();
+  const settings: PrivacyFilterSettings = {
+    aggressiveTrackerBlocking:
+      ctx.settings?.aggressiveTrackerBlocking ?? baseSettings.aggressiveTrackerBlocking,
+    adsFiltering: ctx.settings?.adsFiltering ?? baseSettings.adsFiltering,
+    httpsOnlyMode: ctx.settings?.httpsOnlyMode ?? baseSettings.httpsOnlyMode,
+    enabledLists: {
+      ...baseSettings.enabledLists,
+      ...(ctx.settings?.enabledLists || {}),
+    },
+  };
+  const shouldRecordStats = ctx.recordStats !== false && typeof window !== 'undefined';
+
+  if (
+    !rawUrl ||
+    rawUrl === 'about:blank' ||
+    rawUrl.startsWith('search:') ||
+    rawUrl.startsWith('omarvio:') ||
+    rawUrl.startsWith('about:') ||
+    rawUrl.startsWith('data:') ||
+    rawUrl.startsWith('blob:')
+  ) {
+    return {
+      allowed: true,
+      blockedBy: null,
+      originalUrl: rawUrl,
+      cleanedUrl: rawUrl,
+      strippedParams: [],
+      unwrappedRedirect: false,
+      upgradedHttps: false,
+    };
+  }
+
+  let isLocalProxyPath = false;
+  let proxyExtraParams = new URLSearchParams();
+  let workingUrl = rawUrl;
+
+  if (workingUrl.startsWith('/api/proxy') || workingUrl.includes('/api/proxy?url=')) {
+    try {
+      const parsedProxy = new URL(workingUrl, 'http://localhost');
+      const inner = parsedProxy.searchParams.get('url');
+      if (inner) {
+        isLocalProxyPath = parsedProxy.pathname === '/api/proxy' && !rawUrl.startsWith('http');
+        proxyExtraParams = new URLSearchParams(parsedProxy.searchParams);
+        proxyExtraParams.delete('url');
+        workingUrl = inner;
+      }
+    } catch {}
+  }
+
+  const normalizedSchemeUrl =
+    workingUrl.startsWith('http://') || workingUrl.startsWith('https://')
+      ? workingUrl
+      : `https://${workingUrl}`;
+
+  let unwrappedRedirect = false;
+  let cleanedUrl = normalizedSchemeUrl;
+  let upgradedHttps = false;
+  let originalHttpUrl: string | undefined;
+  const strippedParams: string[] = [];
+
+  // 0. Malware & Phishing domain shield (highest safety priority)
+  if (isMalwareOrPhishingUrl(cleanedUrl, settings.enabledLists)) {
+    if (shouldRecordStats) {
+      incrementTrackerStat(18000, 'tracker');
+    }
+    return {
+      allowed: false,
+      blockedBy: 'malware',
+      originalUrl: rawUrl,
+      cleanedUrl,
+      strippedParams,
+      unwrappedRedirect: false,
+      upgradedHttps: false,
+      reason: 'Blocked by Malware, Scam & Phishing filter list',
+    };
+  }
+
+  // 1. Aggressive Tracker Blocking & Privacy Badger parameter/redirect sanitization
+  const shouldCleanParams =
+    settings.aggressiveTrackerBlocking &&
+    (settings.enabledLists.privacyBadger || settings.enabledLists.easyprivacy);
+
+  if (shouldCleanParams) {
+    const unwrapRes = unwrapTrackingRedirects(cleanedUrl);
+    cleanedUrl = unwrapRes.url;
+    unwrappedRedirect = unwrapRes.unwrapped;
+
+    if (settings.enabledLists.privacyBadger) {
+      try {
+        const parsed = new URL(cleanedUrl);
+        let mutated = false;
+        TRACKING_PARAMS.forEach((param) => {
+          if (parsed.searchParams.has(param)) {
+            parsed.searchParams.delete(param);
+            strippedParams.push(param);
+            mutated = true;
+          }
+        });
+        if (mutated) {
+          cleanedUrl = parsed.toString();
+        }
+      } catch {}
+    }
+
+    if (isTrackerUrl(cleanedUrl, settings.enabledLists)) {
+      if (shouldRecordStats) {
+        incrementTrackerStat(16500, 'tracker');
+      }
+      return {
+        allowed: false,
+        blockedBy: 'tracker',
+        originalUrl: rawUrl,
+        cleanedUrl,
+        strippedParams,
+        unwrappedRedirect,
+        upgradedHttps: false,
+        reason: 'Blocked by EasyPrivacy / Privacy Badger tracker filter list',
+      };
+    }
+  } else if (settings.aggressiveTrackerBlocking && isTrackerUrl(cleanedUrl, settings.enabledLists)) {
+    if (shouldRecordStats) {
+      incrementTrackerStat(16500, 'tracker');
+    }
+    return {
+      allowed: false,
+      blockedBy: 'tracker',
+      originalUrl: rawUrl,
+      cleanedUrl,
+      strippedParams,
+      unwrappedRedirect,
+      upgradedHttps: false,
+      reason: 'Blocked by Aggressive Tracker Blocking middleware',
+    };
+  }
+
+  // 2. Ads Filtering (EasyList & Peter Lowe's list)
+  if (settings.adsFiltering && isAdUrl(cleanedUrl, settings.enabledLists)) {
+    if (shouldRecordStats) {
+      incrementTrackerStat(22000, 'ad');
+    }
+    return {
+      allowed: false,
+      blockedBy: 'ad',
+      originalUrl: rawUrl,
+      cleanedUrl,
+      strippedParams,
+      unwrappedRedirect,
+      upgradedHttps: false,
+      reason: "Blocked by EasyList / Peter Lowe's Ads Filtering middleware",
+    };
+  }
+
+  // 3. HTTPS-Only Mode upgrade
+  if (settings.httpsOnlyMode && !ctx.skipHttpsUpgrade && cleanedUrl.startsWith('http://')) {
+    try {
+      const parsedHttp = new URL(cleanedUrl);
+      const host = parsedHttp.hostname.toLowerCase();
+      if (!isPrivateOrLocalHost(host) && !isHttpAllowedForHost(host)) {
+        originalHttpUrl = cleanedUrl;
+        cleanedUrl = `https://${cleanedUrl.slice('http://'.length)}`;
+        upgradedHttps = true;
+      }
+    } catch {}
+  }
+
+  if (shouldRecordStats && (strippedParams.length > 0 || unwrappedRedirect)) {
+    incrementTrackerStat(12000, 'tracker');
+  }
+
+  let finalOutputUrl = cleanedUrl;
+  if (isLocalProxyPath) {
+    proxyExtraParams.set('tb', settings.aggressiveTrackerBlocking ? '1' : '0');
+    proxyExtraParams.set('af', settings.adsFiltering ? '1' : '0');
+    proxyExtraParams.set('ho', settings.httpsOnlyMode ? '1' : '0');
+    proxyExtraParams.set('lists', serializeEnabledListsParam(settings.enabledLists));
+    const extraStr = proxyExtraParams.toString();
+    finalOutputUrl = `/api/proxy?url=${encodeURIComponent(cleanedUrl)}${extraStr ? `&${extraStr}` : ''}`;
+  }
+
+  return {
+    allowed: true,
+    blockedBy: null,
+    originalUrl: rawUrl,
+    cleanedUrl: finalOutputUrl,
+    strippedParams,
+    unwrappedRedirect,
+    upgradedHttps,
+    originalHttpUrl,
+  };
+};
+
+export const stripTrackingFromHtml = (
+  html: string,
+  options?: Partial<PrivacyFilterSettings>
+): { html: string; blockedCount: number } => {
+  let blockedCount = 0;
+  const aggressiveTrackerBlocking = options?.aggressiveTrackerBlocking ?? true;
+  const adsFiltering = options?.adsFiltering ?? true;
+  const enabledLists = options?.enabledLists ?? DEFAULT_ENABLED_LISTS;
+
+  if (!aggressiveTrackerBlocking && !adsFiltering && !enabledLists.malwarePhishing) {
+    return { html, blockedCount: 0 };
+  }
+
+  // Strip third-party ad/tracker external scripts
   let cleaned = html.replace(
     /<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/script>/gi,
     (match, src) => {
-      if (isAdOrTrackerUrl(src)) {
+      if (isAdOrTrackerUrl(src, { aggressiveTrackerBlocking, adsFiltering, enabledLists })) {
         blockedCount += 1;
         return '';
       }
@@ -193,7 +860,7 @@ export const stripTrackingFromHtml = (html: string): { html: string; blockedCoun
   cleaned = cleaned.replace(
     /<iframe\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/iframe>/gi,
     (match, src) => {
-      if (isAdOrTrackerUrl(src)) {
+      if (isAdOrTrackerUrl(src, { aggressiveTrackerBlocking, adsFiltering, enabledLists })) {
         blockedCount += 1;
         return '';
       }
@@ -205,7 +872,7 @@ export const stripTrackingFromHtml = (html: string): { html: string; blockedCoun
   cleaned = cleaned.replace(
     /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*\/?>/gi,
     (match, src) => {
-      if (isAdOrTrackerUrl(src)) {
+      if (isAdOrTrackerUrl(src, { aggressiveTrackerBlocking, adsFiltering, enabledLists })) {
         blockedCount += 1;
         return '';
       }
@@ -213,18 +880,19 @@ export const stripTrackingFromHtml = (html: string): { html: string; blockedCoun
     }
   );
 
-  // Clean inline utm_*/fbclid/gclid from anchor hrefs lightly
-  cleaned = cleaned.replace(
-    /\bhref=(["'])(https?:\/\/[^"']+)\1/gi,
-    (_m, q, href) => `href=${q}${cleanTrackingParameters(href)}${q}`
-  );
+  // Clean inline utm_*/fbclid/gclid from anchor hrefs when Aggressive Tracker Blocking + Privacy Badger enabled
+  if (aggressiveTrackerBlocking && enabledLists.privacyBadger !== false) {
+    cleaned = cleaned.replace(
+      /\bhref=(["'])(https?:\/\/[^"']+)\1/gi,
+      (_m, q, href) => `href=${q}${cleanTrackingParameters(href)}${q}`
+    );
+  }
 
   return { html: cleaned, blockedCount };
 };
 
-// CSS injection for in-page aggressive ad & popup suppression (Milestone 14)
-export const AD_SUPPRESSION_CSS = `
-  /* Omarvio Aggressive Ad-Block Shield (Milestone 14) */
+// Cosmetic CSS for Ads Core (EasyList / Peter Lowe)
+export const AD_SUPPRESSION_CORE_CSS = `
   .ytp-ad-module,
   .ytp-ad-player-overlay,
   .ytp-ad-text,
@@ -248,7 +916,18 @@ export const AD_SUPPRESSION_CSS = `
   .sponsored_ad,
   .ad-banner,
   .interstitial-ad,
-  .overlay-ad,
+  .overlay-ad {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    width: 0 !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+  }
+`;
+
+// Cosmetic CSS for Cookie Banners & Annoyances List
+export const ANNOYANCES_SUPPRESSION_CSS = `
   div[class*="popup-banner"],
   div[id*="cookie-banner"],
   div[class*="consent-modal"],
@@ -262,13 +941,31 @@ export const AD_SUPPRESSION_CSS = `
   }
 `;
 
-// Script injected to neutralize aggressive popups, auto-redirect traps and frame-busting (Milestone 14)
+// Combined default cosmetic suppression CSS
+export const AD_SUPPRESSION_CSS = `${AD_SUPPRESSION_CORE_CSS}\n${ANNOYANCES_SUPPRESSION_CSS}`;
+
+export const getCosmeticCssForSettings = (options?: {
+  adsFiltering?: boolean;
+  enabledLists?: Partial<Record<AdblockListId, boolean>>;
+}): string => {
+  const adsFiltering = options?.adsFiltering ?? true;
+  const easylistOn = options?.enabledLists?.easylist ?? true;
+  const annoyancesOn = options?.enabledLists?.annoyances ?? true;
+  let css = '';
+  if (adsFiltering && easylistOn) {
+    css += AD_SUPPRESSION_CORE_CSS;
+  }
+  if (annoyancesOn) {
+    css += ANNOYANCES_SUPPRESSION_CSS;
+  }
+  return css;
+};
+
+// Script injected to neutralize aggressive popups, auto-redirect traps and frame-busting
 export const AGGRESSIVE_SHIELD_INJECTION_SCRIPT = `
   (function() {
-    // 1. Prevent malicious pop-ups and auto window.open redirects
     try {
-      var originalOpen = window.open;
-      window.open = function(url, target, features) {
+      window.open = function(url) {
         if (!url || url === 'about:blank' || url.includes('javascript:')) return null;
         try {
           window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: url }, '*');
@@ -277,20 +974,18 @@ export const AGGRESSIVE_SHIELD_INJECTION_SCRIPT = `
       };
     } catch(e) {}
 
-    // 2. Prevent malicious alert/confirm spam
     try {
       window.alert = function() {};
       window.confirm = function() { return true; };
     } catch(e) {}
 
-    // 3. Neutralize frame-busting scripts (top.location = self.location)
     try {
       Object.defineProperty(window, 'top', { get: function() { return window.self; } });
     } catch(e) {}
   })();
 `;
 
-// Script injected to auto-skip in-video mid-rolls (Module M5: 800ms interval, pauses on tab hide)
+// Script injected to auto-skip in-video mid-rolls (pauses on tab hide)
 export const AD_FAST_SKIP_SCRIPT = `
   (function() {
     var timer = null;
@@ -348,9 +1043,16 @@ let listeners: ((s: typeof stats) => void)[] = [];
 
 export const getAdblockStats = () => ({ ...stats });
 
-export const incrementTrackerStat = (bytes: number = 18000) => {
-  stats.trackersBlocked += 1;
-  stats.adsDestroyed += 1;
+export const incrementTrackerStat = (
+  bytes: number = 18000,
+  kind: 'tracker' | 'ad' | 'both' = 'both'
+) => {
+  if (kind === 'tracker' || kind === 'both') {
+    stats.trackersBlocked += 1;
+  }
+  if (kind === 'ad' || kind === 'both') {
+    stats.adsDestroyed += 1;
+  }
   stats.dataSavedMB = parseFloat((stats.dataSavedMB + bytes / (1024 * 1024)).toFixed(2));
   listeners.forEach((fn) => fn({ ...stats }));
 };

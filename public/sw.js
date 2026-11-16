@@ -28,18 +28,20 @@ const AD_TRACKER_DOMAINS_LIST = [
   'googletagmanager.com',
   'doubleclick.net',
   'pagead2.googlesyndication.com',
+  'googlesyndication.com',
+  'googleadservices.com',
   'adservice.google.com',
-  'facebook.net',
   'connect.facebook.net',
   'analytics.facebook.com',
-  'telemetry.sdk',
   'pixel.advertising.com',
   'criteo.com',
+  'criteo.net',
   'adnxs.com',
   'hotjar.com',
   'taboola.com',
   'outbrain.com',
   'scorecardresearch.com',
+  'quantserve.com',
   'branch.io',
   'appsflyer.com',
   'adjust.com',
@@ -48,9 +50,8 @@ const AD_TRACKER_DOMAINS_LIST = [
   'segment.io',
   'clarity.ms',
   'chartbeat.com',
-  'yandex.ru/metrika',
-  'adsystem',
-  'googlesyndication',
+  'mc.yandex.ru',
+  'an.yandex.ru',
   'popads.net',
   'popcash.net',
   'exoclick.com',
@@ -58,7 +59,9 @@ const AD_TRACKER_DOMAINS_LIST = [
   'propellerads.com',
   'smartadserver.com',
   'zemanta.com',
-  'pubmatic.com'
+  'pubmatic.com',
+  'demdex.net',
+  'krxd.net'
 ];
 
 // O(1) Fast lookup Set
@@ -148,14 +151,16 @@ self.addEventListener('activate', (event) => {
 
 function isTrackerUrl(reqUrl) {
   try {
-    const host = new URL(reqUrl).hostname.toLowerCase();
+    const parsed = new URL(reqUrl);
+    const host = parsed.hostname.toLowerCase();
+    // Strict domain or subdomain matching prevents breaking legitimate site paths
     for (const d of AD_TRACKER_SET) {
-      if (host.includes(d) || reqUrl.includes(d)) return true;
+      if (host === d || host.endsWith('.' + d)) return true;
     }
+    if (host.endsWith('facebook.com') && parsed.pathname.startsWith('/tr')) return true;
+    if (/(analytics\.js|gtag\/js|fbevents\.js)$/i.test(parsed.pathname)) return true;
   } catch {
-    for (const d of AD_TRACKER_SET) {
-      if (reqUrl.includes(d)) return true;
-    }
+    return false;
   }
   return false;
 }
@@ -163,7 +168,12 @@ function isTrackerUrl(reqUrl) {
 self.addEventListener('fetch', (event) => {
   const reqUrl = event.request.url;
 
-  // 1. Fast block check for ads, surveillance pixels, and trackers (Brave Shield Style)
+  // Never serve stale SW cache for APK release metadata or crawler manifests
+  if (reqUrl.includes('/apk-release.json') || reqUrl.includes('/api/apk-status') || reqUrl.endsWith('/robots.txt') || reqUrl.endsWith('/sitemap.xml')) {
+    return;
+  }
+
+  // 1. Fast block check for ads, surveillance pixels, and trackers (zero false positives on genuine sites)
   if (isTrackerUrl(reqUrl)) {
     queueBlockedTracker(reqUrl);
     event.respondWith(new Response(null, { status: 204, statusText: 'Blocked By Omarvio Shield' }));

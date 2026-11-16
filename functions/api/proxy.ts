@@ -21,16 +21,63 @@ const EDGE_TRACKING_PARAMS = [
   '_hsenc', '_hsmi', 'mkt_tok', 'ttclid', 'twclid', 'msclkid',
 ];
 
-const EDGE_AD_HOSTS = [
-  'doubleclick.net', 'googlesyndication.com', 'googleadservices.com', 'adservice.google.com',
-  'google-analytics.com', 'googletagmanager.com', 'googletagservices.com', 'adnxs.com',
-  'adsrvr.org', 'connect.facebook.net', 'criteo.com', 'criteo.net', 'taboola.com',
-  'outbrain.com', 'popads.net', 'propellerads.com', 'adsterra.com', 'effectivegatecpm.com',
-  'monetag.com', 'onclickads.net', 'hilltopads.net', 'mgid.com', 'exoclick.com',
-  'scorecardresearch.com', 'quantserve.com', 'pubmatic.com', 'rubiconproject.com',
-  'smartadserver.com', 'openx.net', 'hotjar.com', 'clarity.ms', 'mixpanel.com',
-  'segment.io', 'amplitude.com', 'moatads.com', '2mdn.net', 'an.yandex.ru', 'mc.yandex.ru',
+const EDGE_TRACKER_HOSTS = [
+  'google-analytics.com', 'googletagmanager.com', 'connect.facebook.net',
+  'analytics.facebook.com', 'scorecardresearch.com', 'quantserve.com',
+  'hotjar.com', 'clarity.ms', 'mixpanel.com', 'segment.io', 'segment.com',
+  'amplitude.com', 'chartbeat.com', 'omtrdc.net', 'mc.yandex.ru',
+  'fullstory.com', 'smartlook.com', 'newrelic.com',
 ];
+
+const EDGE_BADGER_HOSTS = [
+  'demdex.net', 'krxd.net', 'bluekai.com', 'exelator.com', 'rlcdn.com',
+  'liveramp.com', 'tapad.com', 'id5-sync.com', 'crwdcntrl.net', 'pippio.com',
+];
+
+const EDGE_PETER_LOWE_HOSTS = [
+  'doubleclick.net', 'adservice.google.com', 'adroll.com', 'adsrvr.org',
+  'advertising.com', 'moatads.com', '2mdn.net', 'zedo.com', 'openx.net',
+  'casalemedia.com', 'bidswitch.net', 'pubmatic.com', 'rubiconproject.com',
+  'smartadserver.com',
+];
+
+const EDGE_AD_HOSTS = [
+  'googlesyndication.com', 'googleadservices.com', 'googletagservices.com',
+  'pagead2.googlesyndication.com', 'adnxs.com', 'criteo.com', 'criteo.net',
+  'taboola.com', 'outbrain.com', 'popads.net', 'popcash.net', 'propellerads.com',
+  'adsterra.com', 'effectivegatecpm.com', 'monetag.com', 'onclickads.net',
+  'hilltopads.net', 'mgid.com', 'exoclick.com', 'juicyads.com', 'trafficjunky.net',
+  'admob.com', 'applovin.com', 'revcontent.com', 'teads.tv', 'sharethrough.com',
+  'media.net', 'an.yandex.ru', 'adcash.com', 'zemanta.com',
+];
+
+const EDGE_MALWARE_HOSTS = [
+  'coinhive.com', 'coin-hive.com', 'cryptoloot.pro', 'jsecoin.com', 'minero.cc', 'adsco.re',
+];
+
+interface EdgeEnabledLists {
+  easylist: boolean;
+  easyprivacy: boolean;
+  privacyBadger: boolean;
+  peterLowe: boolean;
+  malwarePhishing: boolean;
+  annoyances: boolean;
+}
+
+function edgeParseEnabledLists(raw: string | null): EdgeEnabledLists {
+  if (!raw && raw !== '') {
+    return { easylist: true, easyprivacy: true, privacyBadger: true, peterLowe: true, malwarePhishing: true, annoyances: true };
+  }
+  const s = new Set(raw.split(',').map((x) => x.trim()).filter(Boolean));
+  return {
+    easylist: s.has('easylist'),
+    easyprivacy: s.has('easyprivacy'),
+    privacyBadger: s.has('privacyBadger'),
+    peterLowe: s.has('peterLowe'),
+    malwarePhishing: s.has('malwarePhishing'),
+    annoyances: s.has('annoyances'),
+  };
+}
 
 function edgeCleanTrackingParams(rawUrl: string): string {
   try {
@@ -48,28 +95,77 @@ function edgeCleanTrackingParams(rawUrl: string): string {
   }
 }
 
-function edgeIsAdOrTracker(rawUrl: string): boolean {
+function edgeMatchesHost(h: string, list: string[]): boolean {
+  for (const blocked of list) {
+    if (h === blocked || h.endsWith(`.${blocked}`)) return true;
+  }
+  return false;
+}
+
+function edgeIsTracker(rawUrl: string, lists: EdgeEnabledLists): boolean {
   try {
     const u = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
     const h = u.hostname.toLowerCase();
-    for (const blocked of EDGE_AD_HOSTS) {
-      if (h === blocked || h.endsWith(`.${blocked}`)) return true;
+    if (lists.easyprivacy) {
+      if (edgeMatchesHost(h, EDGE_TRACKER_HOSTS)) return true;
+      if (h.endsWith('facebook.com') && u.pathname.startsWith('/tr')) return true;
+      if (/(analytics\.js|gtag\/js|fbevents\.js|pixel\.gif|\/tr\/?\?|\/collect\b|\/beacon\b)/i.test(`${u.pathname}${u.search}`)) return true;
     }
-    if (h.endsWith('facebook.com') && u.pathname.startsWith('/tr')) return true;
-    return /(\/ads\/|\/adserver\/|\/popunder\/|\/pagead\/|google_ad_|analytics\.js|gtag\/js|fbevents\.js)/i.test(
-      `${u.pathname}${u.search}`
-    );
+    if (lists.privacyBadger && edgeMatchesHost(h, EDGE_BADGER_HOSTS)) return true;
+    if (lists.peterLowe && edgeMatchesHost(h, EDGE_PETER_LOWE_HOSTS)) return true;
+    return false;
   } catch {
     return false;
   }
 }
 
-function edgeStripTrackersFromHtml(html: string): { html: string; blockedCount: number } {
+function edgeIsAd(rawUrl: string, lists: EdgeEnabledLists): boolean {
+  try {
+    const u = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
+    const h = u.hostname.toLowerCase();
+    if (lists.easylist) {
+      if (edgeMatchesHost(h, EDGE_AD_HOSTS)) return true;
+      if (/(\/ads\/|\/adserver\/|\/popunder\/|\/pagead\/|google_ad_|adsense)/i.test(`${u.pathname}${u.search}`)) return true;
+    }
+    if (lists.peterLowe && edgeMatchesHost(h, EDGE_PETER_LOWE_HOSTS)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function edgeIsAdOrTracker(
+  rawUrl: string,
+  options: { aggressiveTrackerBlocking?: boolean; adsFiltering?: boolean; lists?: EdgeEnabledLists } = {}
+): boolean {
+  const tb = options.aggressiveTrackerBlocking ?? true;
+  const af = options.adsFiltering ?? true;
+  const lists = options.lists || edgeParseEnabledLists(null);
+  if (lists.malwarePhishing) {
+    try {
+      const u = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
+      if (edgeMatchesHost(u.hostname.toLowerCase(), EDGE_MALWARE_HOSTS)) return true;
+    } catch {}
+  }
+  if (tb && edgeIsTracker(rawUrl, lists)) return true;
+  if (af && edgeIsAd(rawUrl, lists)) return true;
+  return false;
+}
+
+function edgeStripTrackersFromHtml(
+  html: string,
+  options: { aggressiveTrackerBlocking?: boolean; adsFiltering?: boolean; lists?: EdgeEnabledLists } = {}
+): { html: string; blockedCount: number } {
+  const tb = options.aggressiveTrackerBlocking ?? true;
+  const af = options.adsFiltering ?? true;
+  const lists = options.lists || edgeParseEnabledLists(null);
+  if (!tb && !af && !lists.malwarePhishing) return { html, blockedCount: 0 };
+
   let blockedCount = 0;
   let cleaned = html.replace(
     /<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/script>/gi,
     (m, src) => {
-      if (edgeIsAdOrTracker(src)) {
+      if (edgeIsAdOrTracker(src, { aggressiveTrackerBlocking: tb, adsFiltering: af, lists })) {
         blockedCount += 1;
         return '';
       }
@@ -79,7 +175,7 @@ function edgeStripTrackersFromHtml(html: string): { html: string; blockedCount: 
   cleaned = cleaned.replace(
     /<iframe\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/iframe>/gi,
     (m, src) => {
-      if (edgeIsAdOrTracker(src)) {
+      if (edgeIsAdOrTracker(src, { aggressiveTrackerBlocking: tb, adsFiltering: af, lists })) {
         blockedCount += 1;
         return '';
       }
@@ -89,7 +185,7 @@ function edgeStripTrackersFromHtml(html: string): { html: string; blockedCount: 
   cleaned = cleaned.replace(
     /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*\/?>/gi,
     (m, src) => {
-      if (edgeIsAdOrTracker(src)) {
+      if (edgeIsAdOrTracker(src, { aggressiveTrackerBlocking: tb, adsFiltering: af, lists })) {
         blockedCount += 1;
         return '';
       }
@@ -103,6 +199,18 @@ export const onRequest: PagesFunction<Env> = async (context) => {
   const { request } = context;
   const urlObj = new URL(request.url);
   let targetUrl = urlObj.searchParams.get('url');
+  const aggressiveTrackerBlocking = urlObj.searchParams.get('tb') !== '0';
+  const adsFiltering = urlObj.searchParams.get('af') !== '0';
+  const httpsOnlyMode = urlObj.searchParams.get('ho') !== '0';
+  const allowHttpBypass = urlObj.searchParams.get('allowHttp') === '1';
+  const rawListsParam = urlObj.searchParams.get('lists');
+  const lists = edgeParseEnabledLists(rawListsParam);
+  const tbFlag = aggressiveTrackerBlocking ? '1' : '0';
+  const afFlag = adsFiltering ? '1' : '0';
+  const hoFlag = httpsOnlyMode ? '1' : '0';
+  const listsQueryVal = encodeURIComponent(
+    (Object.keys(lists) as Array<keyof EdgeEnabledLists>).filter((k) => lists[k]).join(',')
+  );
 
   if (!targetUrl && request.method === 'POST') {
     try {
@@ -127,6 +235,12 @@ export const onRequest: PagesFunction<Env> = async (context) => {
   // Auto-normalize scheme
   if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
     targetUrl = `https://${targetUrl}`;
+  }
+
+  let originalHttpUrl: string | null = null;
+  if (httpsOnlyMode && !allowHttpBypass && targetUrl.startsWith('http://')) {
+    originalHttpUrl = targetUrl;
+    targetUrl = `https://${targetUrl.slice('http://'.length)}`;
   }
 
   // Optimize platforms to lightweight mobile web variants and unwrap redirects
@@ -183,9 +297,11 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     }
   } catch {}
 
-  targetUrl = edgeCleanTrackingParams(targetUrl);
+  if (aggressiveTrackerBlocking && lists.privacyBadger) {
+    targetUrl = edgeCleanTrackingParams(targetUrl);
+  }
 
-  if (edgeIsAdOrTracker(targetUrl)) {
+  if (edgeIsAdOrTracker(targetUrl, { aggressiveTrackerBlocking, adsFiltering, lists })) {
     return new Response('', {
       status: /\.js($|\?)/i.test(targetUrl) ? 200 : 204,
       headers: {
@@ -193,28 +309,34 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         'Content-Type': /\.js($|\?)/i.test(targetUrl)
           ? 'application/javascript; charset=utf-8'
           : 'text/plain; charset=utf-8',
-        'X-Omarvio-Blocked': 'tracker',
+        'X-Omarvio-Blocked': adsFiltering ? 'ad-or-tracker' : 'tracker',
       },
     });
   }
 
   try {
+    const edgeFetchHeaders: Record<string, string> = {
+      'User-Agent':
+        'Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
+      'Accept':
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
+      'Upgrade-Insecure-Requests': '1',
+    };
+    if (aggressiveTrackerBlocking) {
+      edgeFetchHeaders['DNT'] = '1';
+      edgeFetchHeaders['Sec-GPC'] = '1';
+    }
+
     const response = await fetch(targetUrl, {
       method: request.method === 'POST' ? 'POST' : 'GET',
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
-        'Accept':
-          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
-        'Upgrade-Insecure-Requests': '1',
-        'DNT': '1',
-        'Sec-GPC': '1',
-      },
+      headers: edgeFetchHeaders,
       redirect: 'follow',
     });
 
-    const finalUrl = edgeCleanTrackingParams(response.url || targetUrl);
+    const finalUrl = aggressiveTrackerBlocking
+      ? edgeCleanTrackingParams(response.url || targetUrl)
+      : response.url || targetUrl;
     const contentType = response.headers.get('content-type') || 'text/html';
 
     // Clone response headers and delete ALL framing/decoding blockers
@@ -496,12 +618,17 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         );
       }
 
-      // 0. Strip ad/tracker scripts, pixels, and ad iframes at the Cloudflare Edge
-      const edgeStripped = edgeStripTrackersFromHtml(html);
+      // 0. Strip ad/tracker scripts, pixels, and ad iframes at the Cloudflare Edge per Granular Privacy Settings
+      const edgeStripped = edgeStripTrackersFromHtml(html, {
+        aggressiveTrackerBlocking,
+        adsFiltering,
+        lists,
+      });
       html = edgeStripped.html;
       if (edgeStripped.blockedCount > 0) {
         newHeaders.set('X-Omarvio-Trackers-Stripped', String(edgeStripped.blockedCount));
       }
+      newHeaders.set('X-Omarvio-Middleware', `tb=${tbFlag};af=${afFlag};ho=${hoFlag}`);
 
       // 1. Remove restrictive meta tags and prevent automatic refresh/redirect traps
       html = html.replace(
@@ -517,30 +644,36 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         html = `${baseTag}${html}`;
       }
 
-      // 3. Inject OmarVio navigation interceptor & anti-ad/anti-popup script
-      const interceptor = `
-        <style>
-          html {
-            -webkit-overflow-scrolling: touch !important;
-            touch-action: pan-x pan-y pinch-zoom !important;
-            overscroll-behavior-y: contain !important;
-          }
-          .ytp-ad-module, .ytp-ad-player-overlay, .ytp-ad-text, .video-ads, .ad-container, .ad-interrupting,
+      // 3. Inject OmarVio navigation interceptor & conditional anti-ad/anti-popup script
+      const adCoreCss =
+        adsFiltering && lists.easylist
+          ? `.ytp-ad-module, .ytp-ad-player-overlay, .ytp-ad-text, .video-ads, .ad-container, .ad-interrupting,
           div[id*="google_ads"], div[id*="taboola"], div[id*="outbrain"], div[class*="ad-box"],
           div[class*="ad-slot"], div[class*="ad-wrapper"], div[class*="sponsor"], ins.adsbygoogle,
           iframe[src*="doubleclick"], iframe[src*="googlesyndication"], iframe[src*="adservice"],
           iframe[src*="taboola"], iframe[src*="outbrain"], .fb-ad, .sponsored_ad, .ad-banner,
-          .interstitial-ad, .overlay-ad, div[class*="popup-banner"], div[id*="cookie-banner"],
-          div[class*="consent-modal"], div[id*="onetrust-consent-sdk"] {
+          .interstitial-ad, .overlay-ad {
             display: none !important;
             visibility: hidden !important;
             height: 0 !important;
             width: 0 !important;
             opacity: 0 !important;
             pointer-events: none !important;
-          }
-        </style>
-        <script>
+          }`
+          : '';
+      const annoyancesCss = lists.annoyances
+        ? `div[class*="popup-banner"], div[id*="cookie-banner"], div[class*="consent-modal"], div[id*="onetrust-consent-sdk"] {
+            display: none !important;
+            visibility: hidden !important;
+            height: 0 !important;
+            width: 0 !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+          }`
+        : '';
+      const adCssBlock = `${adCoreCss}\n${annoyancesCss}`;
+      const adSkipScriptBlock = adsFiltering && lists.easylist
+        ? `<script>
           (function() {
             var adSkipTimer = setInterval(function() {
               if (document.hidden) return;
@@ -560,7 +693,18 @@ export const onRequest: PagesFunction<Env> = async (context) => {
               if (document.hidden && adSkipTimer) { clearInterval(adSkipTimer); adSkipTimer = null; }
             });
           })();
-        </script>
+        </script>`
+        : '';
+      const interceptor = `
+        <style>
+          html {
+            -webkit-overflow-scrolling: touch !important;
+            touch-action: pan-x pan-y pinch-zoom !important;
+            overscroll-behavior-y: contain !important;
+          }
+          ${adCssBlock}
+        </style>
+        ${adSkipScriptBlock}
         <script>
           (function() {
             var realParent = window.parent;
@@ -809,6 +953,19 @@ export const onRequest: PagesFunction<Env> = async (context) => {
       headers: newHeaders,
     });
   } catch (err: any) {
+    if (httpsOnlyMode && !allowHttpBypass && targetUrl.startsWith('https://')) {
+      const httpFallback = originalHttpUrl || `http://${targetUrl.slice('https://'.length)}`;
+      let hostName = '';
+      try { hostName = new URL(targetUrl).hostname; } catch {}
+      return new Response(
+        `<!DOCTYPE html><html lang="bn"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HTTPS-Only Mode Warning</title><style>body{background:#070a14;color:#e2e8f0;font-family:sans-serif;text-align:center;padding:30px;}h2{color:#fef3c7;}.btn{display:block;max-width:340px;margin:10px auto;background:linear-gradient(135deg,#10b981,#06b6d4);color:#020617;padding:12px 18px;border-radius:12px;font-weight:bold;text-decoration:none;border:none;cursor:pointer}.warn{background:#1e293b;color:#fcd34d;border:1px solid rgba(245,158,11,0.45)}</style></head><body><h2>🔒 HTTPS-Only Mode Warning</h2><p>এই সাইটটি নিরাপদ HTTPS সমর্থন করে না।</p><p style="color:#fcd34d">${httpFallback}</p><button class="btn" onclick="window.parent.postMessage({type:'OMARVIO_NAVIGATE',url:''},'*')">নিরাপদ স্থানে ফিরে যান</button><a class="btn warn" href="/api/proxy?url=${encodeURIComponent(httpFallback)}&tb=${tbFlag}&af=${afFlag}&ho=0&allowHttp=1&lists=${listsQueryVal}">Continue to HTTP Site Anyway</a><script>try{window.parent.postMessage({type:'OMARVIO_HTTPS_WARNING',httpsUrl:${JSON.stringify(targetUrl)},httpUrl:${JSON.stringify(httpFallback)},host:${JSON.stringify(hostName)},reason:'HTTPS connection failed'},'*');}catch(e){}</script></body></html>`,
+        {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8', 'X-Omarvio-Https-Failed': '1' },
+        }
+      );
+    }
+
     return new Response(
       `<!DOCTYPE html><html><head><meta charset="utf-8"><title>OMARVIO Edge</title><style>body{background:#070a14;color:#e2e8f0;font-family:sans-serif;text-align:center;padding:30px;}</style></head><body><h2>ওয়েবসাইট কানেকশন রিকভারি</h2><p>টার্গেট সার্ভারে সংযোগ সফল হয়নি।</p><p style="color:#38bdf8">${targetUrl}</p><button onclick="window.location.reload()" style="background:#06b6d4;color:#040817;padding:10px 20px;border-radius:12px;font-weight:bold;border:none;cursor:pointer">পুনরায় লোড করুন</button></body></html>`,
       {

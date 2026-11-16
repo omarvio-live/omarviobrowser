@@ -9,6 +9,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Download, X, Smartphone, Check, Laptop, Share, Compass } from 'lucide-react';
+import { isAndroidNativeShell, triggerAndroidAppUpdateCheck } from '../engine/nativeBridge';
 
 export const InstallBanner: React.FC = () => {
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -17,8 +18,10 @@ export const InstallBanner: React.FC = () => {
   const [installedSuccess, setInstalledSuccess] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
   const [deviceType, setDeviceType] = useState<'ios' | 'android' | 'desktop'>('android');
+  const [inAndroidApp, setInAndroidApp] = useState(false);
 
   useEffect(() => {
+    setInAndroidApp(isAndroidNativeShell());
     // Detect device environment
     const ua = navigator.userAgent.toLowerCase();
     const isIos = /iphone|ipad|ipod/.test(ua);
@@ -59,7 +62,7 @@ export const InstallBanner: React.FC = () => {
     };
   }, []);
 
-  // If already standalone (installed) or dismissed by user, do not render
+  // If already standalone (installed PWA) or dismissed by user, do not render
   if (isStandalone || dismissed) {
     return null;
   }
@@ -110,16 +113,31 @@ export const InstallBanner: React.FC = () => {
             </span>
           ) : (
             <div className="flex items-center gap-1.5">
-              <a
-                href="/api/download-apk"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="min-h-[36px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-sm active:scale-95 transition-all cursor-pointer touch-manipulation whitespace-nowrap"
-                title="সরাসরি নেটিভ অ্যান্ড্রয়েড APK ডাউনলোড করুন"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>APK ডাউনলোড</span>
-              </a>
+              {inAndroidApp ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!triggerAndroidAppUpdateCheck()) {
+                      window.location.href = '/api/download-apk?direct=1';
+                    }
+                  }}
+                  className="min-h-[36px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-sm active:scale-95 transition-all cursor-pointer touch-manipulation whitespace-nowrap"
+                  title="অ্যাপ আপডেট চেক ও ইনস্টল করুন"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>অ্যাপ আপডেট</span>
+                </button>
+              ) : (
+                <a
+                  href="/api/download-apk?direct=1"
+                  download="omarvio-browser.apk"
+                  className="min-h-[36px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-sm active:scale-95 transition-all cursor-pointer touch-manipulation whitespace-nowrap"
+                  title="সরাসরি নেটিভ অ্যান্ড্রয়েড APK ডাউনলোড করুন"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>APK ডাউনলোড</span>
+                </a>
+              )}
 
               <button
                 type="button"

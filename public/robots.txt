@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Allow: /api/download-apk?hub=1
+Disallow: /api/proxy
+Disallow: /api/proxy-download
+
+Sitemap: https://omarvio-browser.pages.dev/sitemap.xml

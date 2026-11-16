@@ -3,19 +3,24 @@ package com.omarvio.browser
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.DownloadManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.Settings
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.MimeTypeMap
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -38,7 +43,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -68,25 +72,32 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private const val CLOUDFLARE_HOME_URL = "https://omarvio-browser.pages.dev/?androidShell=1"
 private const val CLOUDFLARE_SETTINGS_URL = "https://omarvio-browser.pages.dev/?androidShell=1&openSettings=1"
 private const val APK_STATUS_API_URL = "https://omarvio-browser.pages.dev/api/apk-status"
 private const val PREFS_NAME = "omarvio_browser_prefs"
+private const val DOWNLOADS_PREFS_KEY = "downloads_json"
 
 private const val MOBILE_USER_AGENT =
     "Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -125,8 +136,74 @@ private data class SavedEntry(
 
 private data class AppUpdateInfo(
     val version: String,
-    val downloadUrl: String
+    val versionCode: Int,
+    val downloadUrl: String,
+    val isDownloading: Boolean = false
 )
+
+private data class HttpsOnlyWarningState(
+    val httpUrl: String,
+    val httpsUrl: String,
+    val reason: String
+)
+
+data class DownloadRecord(
+    val id: String,
+    val dmId: Long,
+    val title: String,
+    val url: String,
+    val localPath: String,
+    val mimeType: String,
+    val category: String,
+    val timestamp: Long,
+    val status: String
+)
+
+private fun loadDownloadRecords(prefs: SharedPreferences): List<DownloadRecord> {
+    val raw = prefs.getString(DOWNLOADS_PREFS_KEY, "[]") ?: "[]"
+    val list = mutableListOf<DownloadRecord>()
+    try {
+        val arr = JSONArray(raw)
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            list.add(
+                DownloadRecord(
+                    id = o.optString("id"),
+                    dmId = o.optLong("dmId", -1L),
+                    title = o.optString("title", "Downloaded File"),
+                    url = o.optString("url"),
+                    localPath = o.optString("localPath"),
+                    mimeType = o.optString("mimeType", "*/*"),
+                    category = o.optString("category", "doc"),
+                    timestamp = o.optLong("timestamp", System.currentTimeMillis()),
+                    status = o.optString("status", "completed")
+                )
+            )
+        }
+    } catch (_: Exception) {
+    }
+    return list
+}
+
+private fun saveDownloadRecords(prefs: SharedPreferences, records: List<DownloadRecord>) {
+    val arr = JSONArray()
+    records.take(100).forEach { r ->
+        arr.put(
+            JSONObject().apply {
+                put("id", r.id)
+                put("dmId", r.dmId)
+                put("title", r.title)
+                put("url", r.url)
+                put("localPath", r.localPath)
+                put("mimeType", r.mimeType)
+                put("category", r.category)
+                put("timestamp", r.timestamp)
+                put("status", r.status)
+            }
+        )
+    }
+    prefs.edit().putString(DOWNLOADS_PREFS_KEY, arr.toString()).apply()
+}
 
 private class OmarvioJsBridge(
     private val appVersion: String,
@@ -136,6 +213,11 @@ private class OmarvioJsBridge(
     private val onClearData: () -> Unit,
     private val onSetAdBlock: (Boolean) -> Unit,
     private val onSetBlockCookies: (Boolean) -> Unit,
+    private val onSetHttpsOnly: (Boolean) -> Unit,
+    private val onSetPrivacyConfig: (String) -> Unit,
+    private val onOpenDownloads: () -> Unit,
+    private val onRegisterDownload: (String, String, String) -> Unit,
+    private val onCheckAppUpdate: () -> Unit,
     private val onOpenSettingsModal: () -> Unit
 ) {
     @JavascriptInterface
@@ -166,6 +248,31 @@ private class OmarvioJsBridge(
     @JavascriptInterface
     fun setBlockThirdPartyCookies(blocked: Boolean) {
         onSetBlockCookies(blocked)
+    }
+
+    @JavascriptInterface
+    fun setHttpsOnly(enabled: Boolean) {
+        onSetHttpsOnly(enabled)
+    }
+
+    @JavascriptInterface
+    fun setPrivacyConfig(jsonConfig: String) {
+        if (jsonConfig.isNotBlank()) onSetPrivacyConfig(jsonConfig)
+    }
+
+    @JavascriptInterface
+    fun openDownloads() {
+        onOpenDownloads()
+    }
+
+    @JavascriptInterface
+    fun registerDownload(url: String, title: String, category: String) {
+        if (url.isNotBlank()) onRegisterDownload(url, title, category)
+    }
+
+    @JavascriptInterface
+    fun checkAppUpdate() {
+        onCheckAppUpdate()
     }
 
     @JavascriptInterface
@@ -203,6 +310,76 @@ class MainActivity : ComponentActivity() {
     private var isCurrentlyHome: Boolean = true
     private var backToHomeCallback: (() -> Unit)? = null
     private var externalIntentUrlState = mutableStateOf<String?>(null)
+    private var onDownloadsChangedCallback: (() -> Unit)? = null
+
+    @Volatile
+    private var pendingApkDownloadId: Long = -1L
+    private var pendingInstallTarget: Pair<Long, String>? = null
+
+    private val unknownSourcesLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            val target = pendingInstallTarget ?: return@registerForActivityResult
+            pendingInstallTarget = null
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
+                installApkFile(target.first, target.second)
+            } else {
+                Toast.makeText(
+                    this,
+                    "ইনস্টলেশনের অনুমতি না দেওয়ায় Downloads হাব থেকে পরে ইনস্টল করতে পারবেন",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+
+    private val downloadCompleteReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) ?: -1L
+            if (id == -1L) return
+
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            var statusLabel = "completed"
+            try {
+                val query = DownloadManager.Query().setFilterById(id)
+                dm.query(query)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val statusCol = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                        if (statusCol >= 0 && cursor.getInt(statusCol) == DownloadManager.STATUS_FAILED) {
+                            statusLabel = "failed"
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+
+            val current = loadDownloadRecords(prefs).toMutableList()
+            var completedRecord: DownloadRecord? = null
+            for (i in current.indices) {
+                if (current[i].dmId == id) {
+                    val updated = current[i].copy(status = statusLabel)
+                    current[i] = updated
+                    completedRecord = updated
+                    break
+                }
+            }
+            saveDownloadRecords(prefs, current)
+            onDownloadsChangedCallback?.invoke()
+
+            if (statusLabel == "completed" &&
+                (id == pendingApkDownloadId || completedRecord?.category == "apk" ||
+                    completedRecord?.title?.endsWith(".apk", true) == true)
+            ) {
+                if (id == pendingApkDownloadId) pendingApkDownloadId = -1L
+                val localPath = completedRecord?.localPath.orEmpty()
+                Toast.makeText(
+                    this@MainActivity,
+                    "আপডেট APK ডাউনলোড সম্পন্ন! ইনস্টলার চালু হচ্ছে...",
+                    Toast.LENGTH_SHORT
+                ).show()
+                installApkFile(id, localPath)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val topBarColor = AndroidColor.parseColor("#18191C")
@@ -218,6 +395,13 @@ class MainActivity : ComponentActivity() {
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
         )
 
+        ContextCompat.registerReceiver(
+            this,
+            downloadCompleteReceiver,
+            IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
         val launchUrl = extractIntentUrl(intent)
         if (launchUrl != null) {
             externalIntentUrlState.value = launchUrl
@@ -231,12 +415,24 @@ class MainActivity : ComponentActivity() {
                 onExternalUrlConsumed = { externalIntentUrlState.value = null },
                 onHomeVisibilityChanged = { homeVisible -> isCurrentlyHome = homeVisible },
                 onRegisterReturnHome = { cb -> backToHomeCallback = cb },
+                onRegisterDownloadsChanged = { cb -> onDownloadsChangedCallback = cb },
                 onInitWebView = { wv -> webView = wv },
-                onDownloadFile = { url, _, contentDisposition, mimeType ->
-                    handleDownload(url, contentDisposition, mimeType)
-                }
+                onDownloadFile = { url, _, contentDisposition, mimeType, isAppUpdate ->
+                    handleDownload(url, contentDisposition, mimeType, isAppUpdate)
+                },
+                onOpenDownloadRecord = { rec -> openDownloadEntry(rec) },
+                onShareDownloadRecord = { rec -> shareDownloadEntry(rec) },
+                onDeleteDownloadRecord = { rec -> deleteDownloadEntry(rec) }
             )
         }
+    }
+
+    override fun onDestroy() {
+        try {
+            unregisterReceiver(downloadCompleteReceiver)
+        } catch (_: Exception) {
+        }
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -250,13 +446,25 @@ class MainActivity : ComponentActivity() {
 
     private fun extractIntentUrl(intent: Intent?): String? {
         if (intent == null) return null
-        val dataUrl = intent.dataString
-        if (!dataUrl.isNullOrBlank() && (dataUrl.startsWith("http://") || dataUrl.startsWith("https://"))) {
-            return dataUrl
-        }
-        val extraText = intent.getStringExtra(Intent.EXTRA_TEXT)
-        if (!extraText.isNullOrBlank() && (extraText.startsWith("http://") || extraText.startsWith("https://"))) {
-            return extraText
+        val rawCandidates = listOfNotNull(
+            intent.dataString,
+            intent.getStringExtra(Intent.EXTRA_TEXT),
+            intent.getStringExtra(Intent.EXTRA_SUBJECT)
+        )
+        val urlRegex = Regex("https?://[^\\s<>\"')\\]]+")
+        for (raw in rawCandidates) {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) continue
+            val extracted = when {
+                trimmed.startsWith("web+omarvio://") -> {
+                    val inner = trimmed.removePrefix("web+omarvio://")
+                    if (inner.startsWith("http://") || inner.startsWith("https://")) inner else "https://$inner"
+                }
+                else -> urlRegex.find(trimmed)?.value
+            }
+            if (!extracted.isNullOrBlank()) {
+                return AdBlockEngine.unwrapRedirectUrl(extracted)
+            }
         }
         return null
     }
@@ -269,23 +477,216 @@ class MainActivity : ComponentActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
-    private fun handleDownload(url: String, contentDisposition: String?, mimeType: String?) {
+    private fun resolveMimeType(fileName: String, rawMime: String?): String {
+        if (fileName.endsWith(".apk", true) || rawMime == "application/vnd.android.package-archive") {
+            return "application/vnd.android.package-archive"
+        }
+        if (!rawMime.isNullOrBlank() && rawMime != "application/octet-stream") {
+            return rawMime
+        }
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+    }
+
+    private fun handleDownload(
+        url: String,
+        contentDisposition: String?,
+        mimeType: String?,
+        isAppUpdate: Boolean = false
+    ) {
         try {
-            val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+            val guessed = URLUtil.guessFileName(url, contentDisposition, mimeType)
+            val isApk = isAppUpdate ||
+                guessed.endsWith(".apk", true) ||
+                url.lowercase().contains(".apk") ||
+                mimeType == "application/vnd.android.package-archive"
+            val fileName = if (isApk && !guessed.endsWith(".apk", true)) {
+                "omarvio-browser-update.apk"
+            } else {
+                guessed
+            }
+            val finalMime = resolveMimeType(fileName, mimeType)
+
+            var localFilePath = ""
             val request = DownloadManager.Request(Uri.parse(url)).apply {
-                setMimeType(mimeType)
+                setMimeType(finalMime)
                 addRequestHeader("User-Agent", MOBILE_USER_AGENT)
-                setDescription("ওমারভিও সিকিউর ডাউনলোড")
+                setDescription("OMARVIO Browser Download")
                 setTitle(fileName)
                 setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                if (isApk) {
+                    val appDownloadsDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                    if (appDownloadsDir != null) {
+                        appDownloadsDir.mkdirs()
+                        val targetFile = File(appDownloadsDir, fileName)
+                        if (targetFile.exists()) targetFile.delete()
+                        localFilePath = targetFile.absolutePath
+                        setDestinationInExternalFilesDir(
+                            this@MainActivity,
+                            Environment.DIRECTORY_DOWNLOADS,
+                            fileName
+                        )
+                    } else {
+                        setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                    }
+                } else {
+                    setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                }
             }
             val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            dm.enqueue(request)
-            Toast.makeText(this, "ডাউনলোড শুরু হয়েছে: $fileName", Toast.LENGTH_SHORT).show()
+            val dmId = dm.enqueue(request)
+            if (isApk) {
+                pendingApkDownloadId = dmId
+            }
+
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val existing = loadDownloadRecords(prefs).toMutableList()
+            val category = when {
+                isApk -> "apk"
+                finalMime.startsWith("image/") -> "image"
+                finalMime.startsWith("video/") -> "video"
+                finalMime.startsWith("audio/") -> "audio"
+                else -> "doc"
+            }
+            existing.add(
+                0,
+                DownloadRecord(
+                    id = "dl-${System.currentTimeMillis()}-$dmId",
+                    dmId = dmId,
+                    title = fileName,
+                    url = url,
+                    localPath = localFilePath,
+                    mimeType = finalMime,
+                    category = category,
+                    timestamp = System.currentTimeMillis(),
+                    status = "downloading"
+                )
+            )
+            saveDownloadRecords(prefs, existing)
+            onDownloadsChangedCallback?.invoke()
+
+            Toast.makeText(this, "ওমারভিও ডাউনলোড শুরু হয়েছে: $fileName", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "ডাউনলোড ব্যর্থ: ${e.message}", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun resolveRecordContentUri(dmId: Long, localPath: String): Uri? {
+        if (localPath.isNotBlank()) {
+            val file = File(localPath)
+            if (file.exists()) {
+                return try {
+                    FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+        if (dmId > 0L) {
+            return try {
+                val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                dm.getUriForDownloadedFile(dmId)
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return null
+    }
+
+    private fun installApkFile(dmId: Long, localPath: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+            pendingInstallTarget = dmId to localPath
+            Toast.makeText(
+                this,
+                "অ্যাপ আপডেট ইনস্টল করতে 'Allow from this source' চালু করুন",
+                Toast.LENGTH_LONG
+            ).show()
+            try {
+                unknownSourcesLauncher.launch(
+                    Intent(
+                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            } catch (_: Exception) {
+            }
+            return
+        }
+
+        val uri = resolveRecordContentUri(dmId, localPath)
+        if (uri == null) {
+            Toast.makeText(this, "APK ফাইলটি এখনো পাওয়া যায়নি বা ডাউনলোড চলছে", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivity(installIntent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "ইনস্টলার খোলা যায়নি: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun openDownloadEntry(record: DownloadRecord) {
+        if (record.category == "apk" || record.title.endsWith(".apk", true)) {
+            installApkFile(record.dmId, record.localPath)
+            return
+        }
+        val uri = resolveRecordContentUri(record.dmId, record.localPath)
+        if (uri == null) {
+            Toast.makeText(this, "ফাইলটি এখনো ডাউনলোড হচ্ছে বা পাওয়া যায়নি", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, record.mimeType.ifBlank { "*/*" })
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivity(viewIntent)
+        } catch (_: Exception) {
+            Toast.makeText(this, "ফাইলটি ওপেন করার অ্যাপ পাওয়া যায়নি", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun shareDownloadEntry(record: DownloadRecord) {
+        val uri = resolveRecordContentUri(record.dmId, record.localPath)
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            if (uri != null) {
+                type = record.mimeType.ifBlank { "*/*" }
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } else {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, record.url)
+            }
+        }
+        try {
+            startActivity(Intent.createChooser(shareIntent, "Share via OMARVIO"))
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun deleteDownloadEntry(record: DownloadRecord) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (record.localPath.isNotBlank()) {
+            try {
+                File(record.localPath).delete()
+            } catch (_: Exception) {
+            }
+        }
+        if (record.dmId > 0L) {
+            try {
+                val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                dm.remove(record.dmId)
+            } catch (_: Exception) {
+            }
+        }
+        val remaining = loadDownloadRecords(prefs).filterNot { it.id == record.id }
+        saveDownloadRecords(prefs, remaining)
+        onDownloadsChangedCallback?.invoke()
     }
 }
 
@@ -296,18 +697,30 @@ fun OmarVioBrowserApp(
     onExternalUrlConsumed: () -> Unit,
     onHomeVisibilityChanged: (Boolean) -> Unit,
     onRegisterReturnHome: (() -> Unit) -> Unit,
+    onRegisterDownloadsChanged: (() -> Unit) -> Unit,
     onInitWebView: (WebView) -> Unit,
-    onDownloadFile: (String, String, String?, String?) -> Unit
+    onDownloadFile: (String, String, String?, String?, Boolean) -> Unit,
+    onOpenDownloadRecord: (DownloadRecord) -> Unit,
+    onShareDownloadRecord: (DownloadRecord) -> Unit,
+    onDeleteDownloadRecord: (DownloadRecord) -> Unit
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
+    val coroutineScope = rememberCoroutineScope()
 
-    val installedVersion = remember {
+    val (installedVersion, installedVersionCode) = remember {
         try {
-            @Suppress("DEPRECATION")
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "2.0.0"
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            val vName = info.versionName ?: "2.0.0"
+            val vCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                info.longVersionCode.toInt()
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode
+            }
+            vName to vCode
         } catch (_: Exception) {
-            "2.0.0"
+            "2.0.0" to 1
         }
     }
 
@@ -362,9 +775,15 @@ fun OmarVioBrowserApp(
         mutableStateOf(prefs.getString("selected_engine", "google") ?: "google")
     }
     var adBlockEnabled by remember { mutableStateOf(prefs.getBoolean("ad_block_enabled", true)) }
+    var easyListEnabled by remember { mutableStateOf(prefs.getBoolean("list_easylist", true)) }
+    var easyPrivacyEnabled by remember { mutableStateOf(prefs.getBoolean("list_easyprivacy", true)) }
+    var privacyBadgerEnabled by remember { mutableStateOf(prefs.getBoolean("list_privacy_badger", true)) }
+    var peterLoweEnabled by remember { mutableStateOf(prefs.getBoolean("list_peter_lowe", true)) }
+    var malwarePhishingEnabled by remember { mutableStateOf(prefs.getBoolean("list_malware_phishing", true)) }
+    var annoyancesEnabled by remember { mutableStateOf(prefs.getBoolean("list_annoyances", true)) }
     var blockThirdPartyCookies by remember { mutableStateOf(prefs.getBoolean("block_third_party_cookies", true)) }
     var doNotTrackEnabled by remember { mutableStateOf(prefs.getBoolean("do_not_track_enabled", true)) }
-    var httpsOnlyMode by remember { mutableStateOf(prefs.getBoolean("https_only_enabled", false)) }
+    var httpsOnlyMode by remember { mutableStateOf(prefs.getBoolean("https_only_enabled", true)) }
     var isJsEnabled by remember { mutableStateOf(prefs.getBoolean("javascript_enabled", true)) }
     var forceDarkWeb by remember { mutableStateOf(prefs.getBoolean("force_dark_web", false)) }
     var saveHistory by remember { mutableStateOf(prefs.getBoolean("save_history_enabled", true)) }
@@ -375,9 +794,16 @@ fun OmarVioBrowserApp(
 
     fun syncPrivacyAndWebSettings() {
         AdBlockEngine.adBlockEnabled = adBlockEnabled
-        AdBlockEngine.stripTrackingParamsEnabled = adBlockEnabled
+        AdBlockEngine.easyListEnabled = easyListEnabled
+        AdBlockEngine.easyPrivacyEnabled = easyPrivacyEnabled
+        AdBlockEngine.privacyBadgerEnabled = privacyBadgerEnabled
+        AdBlockEngine.peterLoweEnabled = peterLoweEnabled
+        AdBlockEngine.malwarePhishingEnabled = malwarePhishingEnabled
+        AdBlockEngine.annoyancesEnabled = annoyancesEnabled
+        AdBlockEngine.stripTrackingParamsEnabled = adBlockEnabled && (privacyBadgerEnabled || easyPrivacyEnabled)
         AdBlockEngine.httpsOnlyEnabled = httpsOnlyMode
         AdBlockEngine.doNotTrackEnabled = doNotTrackEnabled
+        AdBlockEngine.saveToPrefs(prefs)
         internalWebView?.let { wv ->
             wv.settings.javaScriptEnabled = isJsEnabled
             wv.settings.textZoom = textZoomPercent
@@ -393,6 +819,12 @@ fun OmarVioBrowserApp(
 
     LaunchedEffect(
         adBlockEnabled,
+        easyListEnabled,
+        easyPrivacyEnabled,
+        privacyBadgerEnabled,
+        peterLoweEnabled,
+        malwarePhishingEnabled,
+        annoyancesEnabled,
         blockThirdPartyCookies,
         doNotTrackEnabled,
         httpsOnlyMode,
@@ -403,7 +835,7 @@ fun OmarVioBrowserApp(
         syncPrivacyAndWebSettings()
     }
 
-    // Persisted Bookmarks & History
+    // Persisted Bookmarks, History & In-App Owned Downloads
     val bookmarks = remember {
         mutableStateListOf<SavedEntry>().apply {
             val raw = prefs.getString("bookmarks_json", "[]") ?: "[]"
@@ -427,6 +859,16 @@ fun OmarVioBrowserApp(
                 }
             } catch (_: Exception) {}
         }
+    }
+    val downloadsRecords = remember {
+        mutableStateListOf<DownloadRecord>().apply {
+            addAll(loadDownloadRecords(prefs))
+        }
+    }
+
+    fun refreshDownloadsList() {
+        downloadsRecords.clear()
+        downloadsRecords.addAll(loadDownloadRecords(prefs))
     }
 
     fun persistBookmarks() {
@@ -459,6 +901,7 @@ fun OmarVioBrowserApp(
     var showTabsModal by remember { mutableStateOf(false) }
     var showBookmarksModal by remember { mutableStateOf(false) }
     var showHistoryModal by remember { mutableStateOf(false) }
+    var showDownloadsModal by remember { mutableStateOf(false) }
     var showFindBar by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
     var showNativeSettingsModal by remember { mutableStateOf(false) }
@@ -467,12 +910,14 @@ fun OmarVioBrowserApp(
     var readerContent by remember { mutableStateOf("") }
     var readerTheme by remember { mutableIntStateOf(0) } // 0 = Dark, 1 = Sepia, 2 = Light
     var readerFontSize by remember { mutableIntStateOf(16) }
+    var httpsWarningState by remember { mutableStateOf<HttpsOnlyWarningState?>(null) }
 
     // Synced Web Home UI + Auto-Update
     var homeWebView: WebView? by remember { mutableStateOf(null) }
     var homeTargetUrl by remember { mutableStateOf(CLOUDFLARE_HOME_URL) }
     var homeWebFailed by remember { mutableStateOf(false) }
     var availableUpdate by remember { mutableStateOf<AppUpdateInfo?>(null) }
+    var isCheckingUpdate by remember { mutableStateOf(false) }
 
     // Fullscreen HTML5 video state
     var fullscreenView by remember { mutableStateOf<View?>(null) }
@@ -527,10 +972,15 @@ fun OmarVioBrowserApp(
             "${activeEngine.searchBase}${Uri.encode(trimmed)}"
         }
 
-        if (httpsOnlyMode && target.startsWith("http://")) {
+        target = AdBlockEngine.unwrapRedirectUrl(target)
+        if (AdBlockEngine.isMalwareUrl(target)) {
+            Toast.makeText(context, "🛡️ ক্ষতিকর ফিশিং/ম্যালওয়্যার সাইট ব্লক করা হয়েছে", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (httpsOnlyMode && target.startsWith("http://") && !AdBlockEngine.isHttpAllowedForHost(target)) {
             target = "https://" + target.removePrefix("http://")
         }
-        target = AdBlockEngine.stripTrackingParameters(target)
+        httpsWarningState = null
 
         val currentIdx = activeTabIndex.coerceIn(0, tabs.lastIndex)
         val cur = tabs[currentIdx]
@@ -703,32 +1153,59 @@ fun OmarVioBrowserApp(
         persistBookmarks()
     }
 
-    LaunchedEffect(Unit) {
-        onRegisterReturnHome { goToHome() }
-
-        val foundUpdate = withContext(Dispatchers.IO) {
-            try {
-                val conn = (URL(APK_STATUS_API_URL).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 5000
-                    readTimeout = 5000
-                    requestMethod = "GET"
-                }
-                if (conn.responseCode == 200) {
-                    val body = conn.inputStream.bufferedReader().use { it.readText() }
-                    val json = JSONObject(body)
-                    val remoteVer = json.optString("version", "").trim()
-                    val apkUrl = json.optString("directApkUrl", "").trim()
-                    if (remoteVer.isNotEmpty() && apkUrl.isNotEmpty() && isNewerVersion(remoteVer, installedVersion)) {
-                        AppUpdateInfo(remoteVer, apkUrl)
+    fun checkRemoteUpdate(manualTrigger: Boolean) {
+        if (isCheckingUpdate) return
+        isCheckingUpdate = true
+        coroutineScope.launch {
+            val foundUpdate = withContext(Dispatchers.IO) {
+                try {
+                    val conn = (URL("$APK_STATUS_API_URL?t=${System.currentTimeMillis()}").openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 5000
+                        readTimeout = 5000
+                        requestMethod = "GET"
+                        useCaches = false
+                        setRequestProperty("Cache-Control", "no-cache")
+                    }
+                    if (conn.responseCode == 200) {
+                        val body = conn.inputStream.bufferedReader().use { it.readText() }
+                        val json = JSONObject(body)
+                        val remoteVer = json.optString("version", "").trim()
+                        val remoteCode = json.optInt("versionCode", 0)
+                        val apkUrl = json.optString("directApkUrl", "").trim()
+                        val hasNewer = (remoteCode > installedVersionCode) || isNewerVersion(remoteVer, installedVersion)
+                        if (remoteVer.isNotEmpty() && apkUrl.isNotEmpty() && hasNewer) {
+                            AppUpdateInfo(remoteVer, remoteCode, apkUrl)
+                        } else null
                     } else null
-                } else null
-            } catch (_: Exception) {
-                null
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            isCheckingUpdate = false
+            if (foundUpdate != null) {
+                availableUpdate = foundUpdate
+                if (manualTrigger) {
+                    Toast.makeText(
+                        context,
+                        "নতুন আপডেট v${foundUpdate.version} পাওয়া গেছে! উপরের 'আপডেট' বাটনে ট্যাপ করুন।",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } else if (manualTrigger) {
+                Toast.makeText(
+                    context,
+                    "আপনার অ্যাপটি সর্বশেষ সংস্করণে (v$installedVersion) আপডেট আছে",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
         }
-        if (foundUpdate != null) {
-            availableUpdate = foundUpdate
-        }
+    }
+
+    LaunchedEffect(Unit) {
+        AdBlockEngine.loadFromPrefs(prefs)
+        onRegisterReturnHome { goToHome() }
+        onRegisterDownloadsChanged { refreshDownloadsList() }
+        checkRemoteUpdate(manualTrigger = false)
     }
 
     LaunchedEffect(isHomeVisible) {
@@ -742,13 +1219,18 @@ fun OmarVioBrowserApp(
         }
     }
 
-    BackHandler(enabled = showChromeMenu || showEngineModal || showTabsModal || showBookmarksModal || showHistoryModal || showFindBar || showNativeSettingsModal || showReaderModal || !isHomeVisible || fullscreenView != null) {
+    BackHandler(enabled = httpsWarningState != null || showDownloadsModal || showChromeMenu || showEngineModal || showTabsModal || showBookmarksModal || showHistoryModal || showFindBar || showNativeSettingsModal || showReaderModal || !isHomeVisible || fullscreenView != null) {
         when {
             fullscreenView != null -> {
                 fullscreenCallback?.onCustomViewHidden()
                 fullscreenView = null
                 fullscreenCallback = null
             }
+            httpsWarningState != null -> {
+                httpsWarningState = null
+                goToHome()
+            }
+            showDownloadsModal -> showDownloadsModal = false
             showReaderModal -> showReaderModal = false
             showNativeSettingsModal -> showNativeSettingsModal = false
             showChromeMenu -> showChromeMenu = false
@@ -777,21 +1259,20 @@ fun OmarVioBrowserApp(
 
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF060913))) {
         Column(modifier = Modifier.fillMaxSize().imePadding()) {
-            // Top Area: When live synced Home WebView is active, provide clean statusBarsPadding spacer ONLY (zero duplicate header!)
+            // Dedicated Status Bar Spacer guaranteed to never overlap system clock/battery icons on MIUI/HyperOS/Android 15+
+            Spacer(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF18191C))
+                    .windowInsetsTopHeight(WindowInsets.statusBars)
+            )
+
             // When browsing a webpage OR using offline fallback, render the clean Chrome Android Top Omnibox Bar!
-            if (isHomeVisible && !homeWebFailed) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF18191C))
-                        .statusBarsPadding()
-                )
-            } else {
+            if (!isHomeVisible || homeWebFailed) {
                 Surface(color = Color(0xFF18191C), modifier = Modifier.fillMaxWidth()) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .statusBarsPadding()
                             .padding(horizontal = 8.dp, vertical = 8.dp)
                             .height(44.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -957,7 +1438,7 @@ fun OmarVioBrowserApp(
                 }
             }
 
-            // Dismissible In-App Auto-Update Banner whenever Cloudflare reports a newer APK
+            // Dismissible In-App Auto-Update Banner whenever remote reports a newer APK
             AnimatedVisibility(visible = availableUpdate != null) {
                 availableUpdate?.let { update ->
                     Row(
@@ -970,7 +1451,11 @@ fun OmarVioBrowserApp(
                     ) {
                         Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                             Text(
-                                text = "নতুন আপডেট পাওয়া গেছে (v${update.version})",
+                                text = if (update.isDownloading) {
+                                    "আপডেট ডাউনলোড হচ্ছে (v${update.version})..."
+                                } else {
+                                    "নতুন আপডেট পাওয়া গেছে (v${update.version})"
+                                },
                                 color = Color(0xFFECFDF5),
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 12.sp,
@@ -978,7 +1463,11 @@ fun OmarVioBrowserApp(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "১ ক্লিকে নতুন APK ডাউনলোড করে আপডেট করুন",
+                                text = if (update.isDownloading) {
+                                    "সম্পন্ন হলেই সরাসরি APK ইনস্টলার চালু হবে"
+                                } else {
+                                    "১ ক্লিকে নতুন APK ডাউনলোড করে সরাসরি ইনস্টল করুন"
+                                },
                                 color = Color(0xFFA7F3D0),
                                 fontSize = 11.sp,
                                 maxLines = 1,
@@ -990,7 +1479,7 @@ fun OmarVioBrowserApp(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Text(
-                                text = "আপডেট",
+                                text = if (update.isDownloading) "ডাউনলোড হাব" else "আপডেট",
                                 color = Color(0xFF022C22),
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 12.sp,
@@ -998,13 +1487,19 @@ fun OmarVioBrowserApp(
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(Color(0xFF34D399))
                                     .clickable {
-                                        onDownloadFile(
-                                            update.downloadUrl,
-                                            MOBILE_USER_AGENT,
-                                            "attachment; filename=\"omarvio-browser-v${update.version}.apk\"",
-                                            "application/vnd.android.package-archive"
-                                        )
-                                        availableUpdate = null
+                                        if (update.isDownloading) {
+                                            refreshDownloadsList()
+                                            showDownloadsModal = true
+                                        } else {
+                                            onDownloadFile(
+                                                update.downloadUrl,
+                                                MOBILE_USER_AGENT,
+                                                "attachment; filename=\"omarvio-browser-v${update.version}.apk\"",
+                                                "application/vnd.android.package-archive",
+                                                true
+                                            )
+                                            availableUpdate = update.copy(isDownloading = true)
+                                        }
                                     }
                                     .padding(horizontal = 12.dp, vertical = 6.dp)
                             )
@@ -1180,11 +1675,15 @@ fun OmarVioBrowserApp(
                                 onBackNavigationChanged = { backAvailable, forwardAvailable ->
                                     canGoBack = backAvailable
                                     canGoForward = forwardAvailable
+                                },
+                                onHttpsOnlyWarning = { httpUrl, httpsUrl, reason ->
+                                    httpsWarningState = HttpsOnlyWarningState(httpUrl, httpsUrl, reason)
                                 }
                             )
 
                             setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
-                                onDownloadFile(url, userAgent, contentDisposition, mimetype)
+                                val isApk = url.endsWith(".apk", true) || mimetype == "application/vnd.android.package-archive"
+                                onDownloadFile(url, userAgent, contentDisposition, mimetype, isApk)
                             }
 
                             internalWebView = this
@@ -1255,6 +1754,55 @@ fun OmarVioBrowserApp(
                                                         blockThirdPartyCookies = blocked
                                                         prefs.edit().putBoolean("block_third_party_cookies", blocked).apply()
                                                     }
+                                                },
+                                                onSetHttpsOnly = { enabled ->
+                                                    post {
+                                                        httpsOnlyMode = enabled
+                                                        prefs.edit().putBoolean("https_only_enabled", enabled).apply()
+                                                    }
+                                                },
+                                                onSetPrivacyConfig = { jsonStr ->
+                                                    post {
+                                                        AdBlockEngine.applyJsonConfig(jsonStr, prefs)
+                                                        adBlockEnabled = AdBlockEngine.adBlockEnabled
+                                                        easyListEnabled = AdBlockEngine.easyListEnabled
+                                                        easyPrivacyEnabled = AdBlockEngine.easyPrivacyEnabled
+                                                        privacyBadgerEnabled = AdBlockEngine.privacyBadgerEnabled
+                                                        peterLoweEnabled = AdBlockEngine.peterLoweEnabled
+                                                        malwarePhishingEnabled = AdBlockEngine.malwarePhishingEnabled
+                                                        annoyancesEnabled = AdBlockEngine.annoyancesEnabled
+                                                        httpsOnlyMode = AdBlockEngine.httpsOnlyEnabled
+                                                    }
+                                                },
+                                                onOpenDownloads = {
+                                                    post {
+                                                        refreshDownloadsList()
+                                                        showDownloadsModal = true
+                                                    }
+                                                },
+                                                onRegisterDownload = { dlUrl, dlTitle, dlCat ->
+                                                    post {
+                                                        val existing = loadDownloadRecords(prefs).toMutableList()
+                                                        existing.add(
+                                                            0,
+                                                            DownloadRecord(
+                                                                id = "webdl-${System.currentTimeMillis()}",
+                                                                dmId = -1L,
+                                                                title = dlTitle.ifBlank { "File" },
+                                                                url = dlUrl,
+                                                                localPath = "",
+                                                                mimeType = if (dlCat == "apk") "application/vnd.android.package-archive" else "*/*",
+                                                                category = dlCat,
+                                                                timestamp = System.currentTimeMillis(),
+                                                                status = "completed"
+                                                            )
+                                                        )
+                                                        saveDownloadRecords(prefs, existing)
+                                                        refreshDownloadsList()
+                                                    }
+                                                },
+                                                onCheckAppUpdate = {
+                                                    post { checkRemoteUpdate(manualTrigger = true) }
                                                 },
                                                 onOpenSettingsModal = {
                                                     post { showNativeSettingsModal = true }
@@ -1540,9 +2088,8 @@ fun OmarVioBrowserApp(
                         }
                         IconButton(onClick = {
                             showChromeMenu = false
-                            try {
-                                context.startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
-                            } catch (_: Exception) {}
+                            refreshDownloadsList()
+                            showDownloadsModal = true
                         }) {
                             Icon(Icons.Default.Download, contentDescription = "Downloads", tint = Color(0xFFE3E3E3))
                         }
@@ -1575,11 +2122,10 @@ fun OmarVioBrowserApp(
                         showChromeMenu = false
                         clearAllBrowserData()
                     }
-                    ChromeMenuRow(Icons.Default.Download, "Downloads") {
+                    ChromeMenuRow(Icons.Default.Download, "Downloads (${downloadsRecords.size})") {
                         showChromeMenu = false
-                        try {
-                            context.startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
-                        } catch (_: Exception) {}
+                        refreshDownloadsList()
+                        showDownloadsModal = true
                     }
                     ChromeMenuRow(Icons.Default.Bookmark, "Bookmarks") {
                         showChromeMenu = false
@@ -1626,6 +2172,10 @@ fun OmarVioBrowserApp(
 
                     HorizontalDivider(color = Color(0xFF3C4043))
 
+                    ChromeMenuRow(Icons.Default.SystemUpdate, "Check for App Update (v$installedVersion)") {
+                        showChromeMenu = false
+                        checkRemoteUpdate(manualTrigger = true)
+                    }
                     ChromeMenuRow(Icons.Default.Settings, "Browser Settings (Chrome / Shields)") {
                         showChromeMenu = false
                         showNativeSettingsModal = true
@@ -1907,11 +2457,80 @@ fun OmarVioBrowserApp(
                         NativeSettingToggleRow(
                             icon = Icons.Default.Lock,
                             title = "HTTPS-Only Mode",
-                            subtitle = "সকল ওয়েবসাইট এনক্রিপ্টেড HTTPS সংযোগে আপগ্রেড করুন",
+                            subtitle = "সকল অনিরাপদ HTTP সাইট HTTPS-এ আপগ্রেড করুন (অসমর্থিত সাইটে Warning দেখায়)",
                             checked = httpsOnlyMode,
                             onCheckedChange = {
                                 httpsOnlyMode = it
                                 prefs.edit().putBoolean("https_only_enabled", it).apply()
+                            }
+                        )
+
+                        HorizontalDivider(color = Color(0xFF2D2F34))
+                        Text("GRANULAR ADBLOCK FILTER LISTS", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.Shield,
+                            title = "EasyList Core Ads",
+                            subtitle = "ব্যানার বিজ্ঞাপন, পপ-আপ ও ভিডিও অ্যাড নেটওয়ার্ক ব্লক করুন",
+                            checked = easyListEnabled,
+                            onCheckedChange = {
+                                easyListEnabled = it
+                                prefs.edit().putBoolean("list_easylist", it).apply()
+                            }
+                        )
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.PrivacyTip,
+                            title = "EasyPrivacy Tracker Shield",
+                            subtitle = "Analytics, বেকন পিক্সেল ও হিটম্যাপ ট্র্যাকার ব্লক করুন",
+                            checked = easyPrivacyEnabled,
+                            onCheckedChange = {
+                                easyPrivacyEnabled = it
+                                prefs.edit().putBoolean("list_easyprivacy", it).apply()
+                            }
+                        )
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.Security,
+                            title = "Privacy Badger Heuristic Shield",
+                            subtitle = "fbclid / utm_* ও ক্রস-সাইট ফিঙ্গারপ্রিন্টিং বন্ধ করুন",
+                            checked = privacyBadgerEnabled,
+                            onCheckedChange = {
+                                privacyBadgerEnabled = it
+                                prefs.edit().putBoolean("list_privacy_badger", it).apply()
+                            }
+                        )
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.Bolt,
+                            title = "Peter Lowe's Fast Hosts",
+                            subtitle = "০-মিলিসেকেন্ড ডোমেইন ফিল্টারিং ও দ্রুত পেজ লোডিং",
+                            checked = peterLoweEnabled,
+                            onCheckedChange = {
+                                peterLoweEnabled = it
+                                prefs.edit().putBoolean("list_peter_lowe", it).apply()
+                            }
+                        )
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.Warning,
+                            title = "Malware & Phishing Shield",
+                            subtitle = "ক্ষতিকর ম্যালওয়্যার, ফিশিং পেজ ও ক্রিপ্টো-ড্রেইনার ব্লক করুন",
+                            checked = malwarePhishingEnabled,
+                            onCheckedChange = {
+                                malwarePhishingEnabled = it
+                                prefs.edit().putBoolean("list_malware_phishing", it).apply()
+                            }
+                        )
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.CleanHands,
+                            title = "Cookie Banners & Annoyances",
+                            subtitle = "বিরক্তিকর কুকি কনসেন্ট পপ-আপ ও ওভারলে লুকিয়ে রাখুন",
+                            checked = annoyancesEnabled,
+                            onCheckedChange = {
+                                annoyancesEnabled = it
+                                prefs.edit().putBoolean("list_annoyances", it).apply()
                             }
                         )
 
@@ -2031,7 +2650,57 @@ fun OmarVioBrowserApp(
                         }
 
                         HorizontalDivider(color = Color(0xFF2D2F34))
-                        Text("DATA & STORAGE", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("APP UPDATES, DOWNLOADS & DATA", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF064E3B).copy(alpha = 0.55f))
+                                .border(1.dp, Color(0xFF34D399).copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                                .clickable {
+                                    showNativeSettingsModal = false
+                                    checkRemoteUpdate(manualTrigger = true)
+                                }
+                                .padding(horizontal = 12.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = Color(0xFF34D399), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text("Check & Install App Update", color = Color(0xFFECFDF5), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("বর্তমান সংস্করণ: v$installedVersion ($installedVersionCode)", color = Color(0xFFA7F3D0), fontSize = 11.sp)
+                                }
+                            }
+                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Color(0xFF34D399))
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF24262B))
+                                .clickable {
+                                    showNativeSettingsModal = false
+                                    refreshDownloadsList()
+                                    showDownloadsModal = true
+                                }
+                                .padding(horizontal = 12.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.Download, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text("Omarvio Downloads Hub", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("সকল ডাউনলোড করা APK ও ফাইল (${downloadsRecords.size})", color = Color(0xFF9AA0A6), fontSize = 11.sp)
+                                }
+                            }
+                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Color(0xFF9AA0A6))
+                        }
 
                         Row(
                             modifier = Modifier
@@ -2053,6 +2722,218 @@ fun OmarVioBrowserApp(
                                 Text("হিস্ট্রি, কুকি, ক্যাশ ও সাইট ডেটা মুছে ফেলুন", color = Color(0xFFFDA4AF), fontSize = 11.sp)
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // OMARVIO OWNED IN-APP DOWNLOADS HUB (Keeps all downloads & APK updates inside Omarvio)
+        // =========================================================================
+        if (showDownloadsModal) {
+            Dialog(onDismissRequest = { showDownloadsModal = false }) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 600.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(Color(0xFF18191C))
+                        .border(1.dp, Color(0xFF3C4043), RoundedCornerShape(22.dp))
+                        .padding(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Download, contentDescription = null, tint = Color(0xFF34D399), modifier = Modifier.size(22.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text("Omarvio Downloads (${downloadsRecords.size})", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                Text("ব্রাউজার নিজস্ব ডাউনলোড ম্যানেজার · সরাসরি APK ইনস্টল", color = Color(0xFF9AA0A6), fontSize = 11.sp)
+                            }
+                        }
+                        IconButton(onClick = { showDownloadsModal = false }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF9AA0A6))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    if (downloadsRecords.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF24262B))
+                                .padding(vertical = 28.dp, horizontal = 16.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "এখনো কোনো ফাইল ডাউনলোড করা হয়নি। সকল ফাইল ও অ্যাপ আপডেট এখানে জমা থাকবে।",
+                                color = Color(0xFF9AA0A6),
+                                fontSize = 12.sp
+                            )
+                        }
+                    } else {
+                        val fmt = remember { SimpleDateFormat("dd MMM, HH:mm", Locale.getDefault()) }
+                        LazyColumn(
+                            modifier = Modifier.weight(1f, fill = false).heightIn(max = 390.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(downloadsRecords, key = { it.id }) { item ->
+                                val isApk = item.category == "apk" || item.title.endsWith(".apk", true)
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(Color(0xFF24262B))
+                                        .border(
+                                            1.dp,
+                                            if (isApk) Color(0xFF10B981).copy(alpha = 0.45f) else Color(0xFF3C4043),
+                                            RoundedCornerShape(14.dp)
+                                        )
+                                        .padding(12.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                        Text(
+                                            text = item.title,
+                                            color = Color.White,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 13.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f).padding(end = 6.dp)
+                                        )
+                                        if (isApk) {
+                                            Text(
+                                                text = "APK",
+                                                color = Color(0xFF022C22),
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(Color(0xFF34D399))
+                                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Text(
+                                        text = "${fmt.format(Date(item.timestamp))} · ${item.status.uppercase()}",
+                                        color = Color(0xFF9AA0A6),
+                                        fontSize = 11.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text(
+                                            text = if (isApk) "ইনস্টল করুন" else "ওপেন",
+                                            color = Color(0xFF04101E),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(if (isApk) Color(0xFF34D399) else Color(0xFF38BDF8))
+                                                .clickable { onOpenDownloadRecord(item) }
+                                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                                        )
+                                        Text(
+                                            text = "শেয়ার",
+                                            color = Color.White,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(Color(0xFF35373D))
+                                                .clickable { onShareDownloadRecord(item) }
+                                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                                        )
+                                        Text(
+                                            text = "মুছুন",
+                                            color = Color(0xFFFDA4AF),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(Color(0xFF3B1219))
+                                                .clickable { onDeleteDownloadRecord(item) }
+                                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // HTTPS-ONLY MODE WARNING SCREEN (Native Chromium TLS Fallback Protection)
+        // =========================================================================
+        httpsWarningState?.let { warn ->
+            Dialog(onDismissRequest = { httpsWarningState = null }) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color(0xFF1A1114))
+                        .border(1.dp, Color(0xFFFB7185).copy(alpha = 0.6f), RoundedCornerShape(24.dp))
+                        .padding(18.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier.size(42.dp).clip(CircleShape).background(Color(0xFF4C0519)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFFB7185), modifier = Modifier.size(22.dp))
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text("HTTPS-Only Mode Warning", color = Color(0xFFFFE4E6), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text("নিরাপদ এনক্রিপ্টেড সংযোগ পাওয়া যায়নি", color = Color(0xFFFDA4AF), fontSize = 11.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = warn.reason,
+                        color = Color(0xFFE2E8F0),
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = warn.httpsUrl,
+                        color = Color(0xFFFDA4AF),
+                        fontSize = 11.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Button(
+                        onClick = {
+                            httpsWarningState = null
+                            goToHome()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("নিরাপদ স্থানে ফিরে যান (Go Back to Safety)", color = Color(0xFF022C22), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            AdBlockEngine.allowHttpHostOnce(warn.httpUrl)
+                            val targetHttp = warn.httpUrl
+                            httpsWarningState = null
+                            navigateToUrl(targetHttp)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("তবুও HTTP সাইটে যান (Continue Anyway)", color = Color(0xFFFDA4AF), fontSize = 12.sp)
                     }
                 }
             }

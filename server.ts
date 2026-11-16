@@ -19,7 +19,9 @@ import {
   cleanTrackingParameters,
   isAdOrTrackerUrl,
   stripTrackingFromHtml,
-  AD_SUPPRESSION_CSS,
+  parseEnabledListsParam,
+  serializeEnabledListsParam,
+  getCosmeticCssForSettings,
   AD_FAST_SKIP_SCRIPT,
 } from './src/engine/adblocker';
 
@@ -129,6 +131,17 @@ async function startServer() {
   // =========================================================================
   app.all('/api/proxy', async (req, res) => {
     let targetUrl = (req.query.url as string) || (req.body?.url as string);
+    const aggressiveTrackerBlocking = req.query.tb !== '0';
+    const adsFiltering = req.query.af !== '0';
+    const httpsOnlyMode = req.query.ho !== '0';
+    const allowHttpBypass = req.query.allowHttp === '1';
+    const rawListsParam = typeof req.query.lists === 'string' ? req.query.lists : undefined;
+    const enabledLists = parseEnabledListsParam(rawListsParam);
+    const tbFlag = aggressiveTrackerBlocking ? '1' : '0';
+    const afFlag = adsFiltering ? '1' : '0';
+    const hoFlag = httpsOnlyMode ? '1' : '0';
+    const listsQueryVal = encodeURIComponent(serializeEnabledListsParam(enabledLists));
+
     if (!targetUrl) {
       return res.status(400).send('Missing url parameter');
     }
@@ -145,6 +158,12 @@ async function startServer() {
     // Auto-fix URL scheme
     if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
       targetUrl = `https://${targetUrl}`;
+    }
+
+    let originalHttpUrl: string | null = null;
+    if (httpsOnlyMode && !allowHttpBypass && targetUrl.startsWith('http://')) {
+      originalHttpUrl = targetUrl;
+      targetUrl = `https://${targetUrl.slice('http://'.length)}`;
     }
 
     // SSRF IP Validation (Module M4: Block private & metadata IPs)
@@ -206,13 +225,15 @@ async function startServer() {
       }
     } catch {}
 
-    // Strip surveillance & tracking query parameters (fbclid, gclid, utm_*, ttclid, etc.)
-    targetUrl = cleanTrackingParameters(targetUrl);
+    // Strip surveillance & tracking query parameters when Aggressive Tracker Blocking is enabled
+    if (aggressiveTrackerBlocking) {
+      targetUrl = cleanTrackingParameters(targetUrl);
+    }
 
-    // Block direct ad-network, pixel & telemetry URLs cleanly at server edge (0ms)
-    if (isAdOrTrackerUrl(targetUrl)) {
+    // Block direct ad-network, pixel & telemetry URLs cleanly at server edge per active granular block-lists
+    if (isAdOrTrackerUrl(targetUrl, { aggressiveTrackerBlocking, adsFiltering, enabledLists })) {
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('X-Omarvio-Blocked', 'tracker');
+      res.setHeader('X-Omarvio-Blocked', adsFiltering ? 'ad-or-tracker' : 'tracker');
       if (/\.js($|\?)/i.test(targetUrl)) {
         res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
         return res.status(200).send('/* blocked by Omarvio Shield */');
@@ -226,7 +247,8 @@ async function startServer() {
 
     // Check fast in-memory cache for static assets (images, css, js, fonts)
     const isStaticAsset = targetUrl.match(/\.(css|js|png|jpg|jpeg|gif|webp|svg|woff2?|ttf|ico)($|\?)/i);
-    const cached = proxyMemoryCache.get(targetUrl);
+    const cacheKey = `${targetUrl}|tb=${tbFlag}&af=${afFlag}&lists=${listsQueryVal}`;
+    const cached = proxyMemoryCache.get(cacheKey);
     if (isStaticAsset && cached && cached.expires > Date.now()) {
       res.setHeader('Content-Type', cached.contentType);
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -246,9 +268,11 @@ async function startServer() {
           'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
         'Upgrade-Insecure-Requests': '1',
-        'DNT': '1',
-        'Sec-GPC': '1',
       };
+      if (aggressiveTrackerBlocking) {
+        fetchHeaders['DNT'] = '1';
+        fetchHeaders['Sec-GPC'] = '1';
+      }
 
       const fetchInit: RequestInit = {
         method: req.method === 'POST' ? 'POST' : 'GET',
@@ -271,7 +295,9 @@ async function startServer() {
       const response = await fetch(targetUrl, fetchInit);
       if (timeout) clearTimeout(timeout);
 
-      const finalUrl = cleanTrackingParameters(response.url || targetUrl);
+      const finalUrl = aggressiveTrackerBlocking
+        ? cleanTrackingParameters(response.url || targetUrl)
+        : response.url || targetUrl;
       const contentType = response.headers.get('content-type') || 'text/html';
 
       // Remove restrictive framing and security headers
@@ -334,12 +360,17 @@ async function startServer() {
           `);
         }
 
-        // 0. Strip ad/tracker scripts, tracking pixels, and ad iframes server-side
-        const strippedResult = stripTrackingFromHtml(html);
+        // 0. Strip ad/tracker scripts, tracking pixels, and ad iframes server-side per Granular Privacy Settings
+        const strippedResult = stripTrackingFromHtml(html, {
+          aggressiveTrackerBlocking,
+          adsFiltering,
+          enabledLists,
+        });
         html = strippedResult.html;
         if (strippedResult.blockedCount > 0) {
           res.setHeader('X-Omarvio-Trackers-Stripped', String(strippedResult.blockedCount));
         }
+        res.setHeader('X-Omarvio-Middleware', `tb=${tbFlag};af=${afFlag};ho=${hoFlag}`);
 
         // 1. Remove restrictive meta tags and prevent automatic refresh/redirect traps
         html = html.replace(
@@ -355,7 +386,9 @@ async function startServer() {
           html = `${baseTag}${html}`;
         }
 
-        // 3. Inject anti-frame-busting, popup neutralization, aggressive ad-block CSS, and video ad skipper
+        // 3. Inject anti-frame-busting, popup neutralization, granular ad-block CSS, and video ad skipper
+        const privacyFlagsQuery = `&tb=${tbFlag}&af=${afFlag}&ho=${hoFlag}&lists=${listsQueryVal}`;
+        const cosmeticCss = getCosmeticCssForSettings({ adsFiltering, enabledLists });
         const interceptor = `
           <style>
             html {
@@ -363,12 +396,13 @@ async function startServer() {
               touch-action: pan-x pan-y pinch-zoom !important;
               overscroll-behavior-y: contain !important;
             }
-            ${AD_SUPPRESSION_CSS}
+            ${cosmeticCss}
           </style>
-          <script>${AD_FAST_SKIP_SCRIPT}</script>
+          ${adsFiltering && enabledLists.easylist !== false ? `<script>${AD_FAST_SKIP_SCRIPT}</script>` : ''}
           <script>
             (function() {
               var speculativeUrl = null;
+              var privacyFlags = '${privacyFlagsQuery}';
 
               // 1. Force all target="_blank", target="_new" to target="_self" immediately and continuously
               function enforceSelfNavigation() {
@@ -408,10 +442,10 @@ async function startServer() {
                     try {
                       var absoluteUrl = new URL(url, document.baseURI || window.location.href).href;
                       window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: absoluteUrl }, '*');
-                      window.location.href = '/api/proxy?url=' + encodeURIComponent(absoluteUrl);
+                      window.location.href = '/api/proxy?url=' + encodeURIComponent(absoluteUrl) + privacyFlags;
                     } catch(err) {
                       window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: url }, '*');
-                      window.location.href = '/api/proxy?url=' + encodeURIComponent(url);
+                      window.location.href = '/api/proxy?url=' + encodeURIComponent(url) + privacyFlags;
                     }
                   }
                   return null;
@@ -506,7 +540,7 @@ async function startServer() {
                   try {
                     window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: target }, '*');
                   } catch(pe) {}
-                  window.location.href = '/api/proxy?url=' + encodeURIComponent(target);
+                  window.location.href = '/api/proxy?url=' + encodeURIComponent(target) + privacyFlags;
                 }
               }
 
@@ -532,7 +566,7 @@ async function startServer() {
                       e.stopPropagation();
                       var searchDest = 'https://www.google.com/search?q=' + encodeURIComponent(qTerm);
                       window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: searchDest }, '*');
-                      window.location.href = '/api/proxy?url=' + encodeURIComponent(searchDest);
+                      window.location.href = '/api/proxy?url=' + encodeURIComponent(searchDest) + privacyFlags;
                       return;
                     }
                     if (method === 'GET' && action) {
@@ -541,7 +575,7 @@ async function startServer() {
                       e.preventDefault();
                       e.stopPropagation();
                       window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: resolvedAction.href }, '*');
-                      window.location.href = '/api/proxy?url=' + encodeURIComponent(resolvedAction.href);
+                      window.location.href = '/api/proxy?url=' + encodeURIComponent(resolvedAction.href) + privacyFlags;
                     }
                   } catch(err) {}
                 }
@@ -585,7 +619,7 @@ async function startServer() {
                     if (url && typeof url === 'string' && !url.startsWith('/api/proxy')) {
                       var resolved = new URL(url, document.baseURI || '${finalUrl}').href;
                       window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: resolved }, '*');
-                      return origPushState.call(window.history, state, title, '/api/proxy?url=' + encodeURIComponent(resolved));
+                      return origPushState.call(window.history, state, title, '/api/proxy?url=' + encodeURIComponent(resolved) + privacyFlags);
                     }
                     return origPushState.apply(window.history, arguments);
                   } catch(e) {}
@@ -594,7 +628,7 @@ async function startServer() {
                   try {
                     if (url && typeof url === 'string' && !url.startsWith('/api/proxy')) {
                       var resolved = new URL(url, document.baseURI || '${finalUrl}').href;
-                      return origReplaceState.call(window.history, state, title, '/api/proxy?url=' + encodeURIComponent(resolved));
+                      return origReplaceState.call(window.history, state, title, '/api/proxy?url=' + encodeURIComponent(resolved) + privacyFlags);
                     }
                     return origReplaceState.apply(window.history, arguments);
                   } catch(e) {}
@@ -620,7 +654,7 @@ async function startServer() {
 
         // Cache static assets in memory for 15 minutes
         if (isStaticAsset && response.status === 200 && buffer.length < 5 * 1024 * 1024) {
-          proxyMemoryCache.set(targetUrl, {
+          proxyMemoryCache.set(cacheKey, {
             body: buffer,
             contentType,
             status: response.status,
@@ -632,6 +666,62 @@ async function startServer() {
       }
     } catch (err: any) {
       if (timeout) clearTimeout(timeout);
+      const errMsg = String(err?.cause?.code || err?.code || err?.message || '');
+      const isTlsOrHttpsFailure =
+        Boolean(originalHttpUrl) ||
+        /CERT_|SSL|TLS|UNABLE_TO_VERIFY|ERR_TLS|ECONNREFUSED|fetch failed/i.test(errMsg);
+
+      if (httpsOnlyMode && !allowHttpBypass && isTlsOrHttpsFailure && targetUrl.startsWith('https://')) {
+        const httpFallbackUrl = originalHttpUrl || `http://${targetUrl.slice('https://'.length)}`;
+        let hostName = '';
+        try {
+          hostName = new URL(targetUrl).hostname;
+        } catch {}
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('X-Omarvio-Https-Failed', '1');
+        return res.status(200).send(`
+          <!DOCTYPE html>
+          <html lang="bn">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>HTTPS-Only Mode Warning</title>
+            <style>
+              body { background: #070a14; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 24px; text-align: center; }
+              .card { max-width: 460px; width: 100%; background: #0d1226; border: 1px solid rgba(245,158,11,0.45); border-radius: 24px; padding: 28px; box-shadow: 0 20px 40px rgba(0,0,0,0.65); }
+              .icon { width: 56px; height: 56px; background: rgba(245,158,11,0.16); border: 1px solid rgba(245,158,11,0.45); border-radius: 18px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 16px; font-size: 26px; }
+              h2 { margin: 0 0 8px; font-size: 18px; font-weight: 800; color: #fef3c7; }
+              p { font-size: 13px; color: #cbd5e1; line-height: 1.55; margin: 0 0 16px; }
+              .url { background: #050814; border: 1px solid rgba(245,158,11,0.3); padding: 8px 12px; border-radius: 12px; font-family: monospace; font-size: 11px; color: #fcd34d; word-break: break-all; margin-bottom: 18px; text-align: left; }
+              .btn { display: block; width: 100%; box-sizing: border-box; background: linear-gradient(135deg, #10b981, #06b6d4); color: #020617; font-weight: 800; font-size: 13px; padding: 12px 18px; border-radius: 14px; text-decoration: none; border: none; cursor: pointer; margin-bottom: 10px; }
+              .btn-warn { background: #1e293b; color: #fcd34d; border: 1px solid rgba(245,158,11,0.45); }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div class="icon">🔒</div>
+              <h2>HTTPS-Only Mode Warning</h2>
+              <p>এই সাইটটি নিরাপদ HTTPS এনক্রিপশন সমর্থন করে না। অ-এনক্রিপ্টেড HTTP সংযোগে ডেটা ফাঁস হওয়ার ঝুঁকি থাকতে পারে।</p>
+              <div class="url">${httpFallbackUrl}</div>
+              <button class="btn" onclick="window.parent.postMessage({type:'OMARVIO_NAVIGATE',url:''},'*'); window.history.back();">নিরাপদ স্থানে ফিরে যান</button>
+              <a class="btn btn-warn" href="/api/proxy?url=${encodeURIComponent(httpFallbackUrl)}&tb=${tbFlag}&af=${afFlag}&ho=0&allowHttp=1&lists=${listsQueryVal}">Continue to HTTP Site Anyway</a>
+            </div>
+            <script>
+              try {
+                window.parent.postMessage({
+                  type: 'OMARVIO_HTTPS_WARNING',
+                  httpsUrl: ${JSON.stringify(targetUrl)},
+                  httpUrl: ${JSON.stringify(httpFallbackUrl)},
+                  host: ${JSON.stringify(hostName)},
+                  reason: ${JSON.stringify(errMsg || 'HTTPS connection failed')}
+                }, '*');
+              } catch(e) {}
+            </script>
+          </body>
+          </html>
+        `);
+      }
+
       console.warn(`Proxy warning for ${targetUrl}:`, err.message);
       // Return a clean, native Omarvio styled error recovery page in HTML
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -725,32 +815,58 @@ async function startServer() {
     return null;
   };
 
+  const readReleaseManifest = (): {
+    repo?: string;
+    apkUrl?: string;
+    version?: string;
+    versionCode?: number;
+  } => {
+    try {
+      const manifestPath = path.join(process.cwd(), 'public', 'apk-release.json');
+      if (fs.existsSync(manifestPath)) {
+        return JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      }
+    } catch {}
+    return {};
+  };
+
   app.get('/api/apk-status', (_req, res) => {
     const localApk = findLocalApkPath();
-    const envApkUrl = (process.env.OMARVIO_APK_URL || '').trim();
-    const envRepo = (process.env.OMARVIO_GITHUB_REPO || '').trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\/+$/, '');
+    const releaseJson = readReleaseManifest();
+    const envApkUrl = (process.env.OMARVIO_APK_URL || releaseJson.apkUrl || '').trim();
+    const envRepo = (process.env.OMARVIO_GITHUB_REPO || releaseJson.repo || '')
+      .trim()
+      .replace(/^https?:\/\/github\.com\//i, '')
+      .replace(/\/+$/, '');
     const githubReleaseUrl = envApkUrl || (envRepo ? `https://github.com/${envRepo}/releases/latest/download/omarvio-browser.apk` : '');
 
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
     res.json({
       hasLocalBinary: Boolean(localApk),
       directApkUrl: localApk ? '/api/download-apk?direct=1' : githubReleaseUrl || null,
       githubRepo: envRepo || null,
       workflowFile: '.github/workflows/build-apk.yml',
       packageName: 'com.omarvio.browser',
-      version: '2.0.0',
+      version: releaseJson.version || '2.0.0.12',
+      versionCode: releaseJson.versionCode || 12,
     });
   });
 
   app.get('/api/download-apk', (req, res) => {
     const localApk = findLocalApkPath();
+    const releaseJson = readReleaseManifest();
+    const verLabel = releaseJson.version || '2.0.0.12';
     if (localApk) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="omarvio-browser-v2.0.0.apk"');
+      res.setHeader('Content-Disposition', `attachment; filename="omarvio-browser-v${verLabel}.apk"`);
       return res.sendFile(localApk);
     }
 
-    const envApkUrl = (process.env.OMARVIO_APK_URL || '').trim();
-    const envRepo = (process.env.OMARVIO_GITHUB_REPO || '').trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\/+$/, '');
+    const envApkUrl = (process.env.OMARVIO_APK_URL || releaseJson.apkUrl || '').trim();
+    const envRepo = (process.env.OMARVIO_GITHUB_REPO || releaseJson.repo || '')
+      .trim()
+      .replace(/^https?:\/\/github\.com\//i, '')
+      .replace(/\/+$/, '');
     const directUrl = envApkUrl || (envRepo ? `https://github.com/${envRepo}/releases/latest/download/omarvio-browser.apk` : '');
 
     if (directUrl && req.query.hub !== '1') {

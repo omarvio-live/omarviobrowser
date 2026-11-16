@@ -50,6 +50,7 @@ import {
   openUrlInNativeAndroid,
   syncDesktopModeWithAndroid,
   clearNativeAndroidBrowsingData,
+  openAndroidDownloadsHub,
 } from './engine/nativeBridge';
 
 // Module M7: Code-split heavy modals with React.lazy
@@ -71,7 +72,7 @@ import {
   initNativeDownloadObserver,
 } from './engine/proxy';
 import { unwrapAndSanitizeExternalUrl } from './engine/linkInterceptor';
-import { cleanTrackingParameters, incrementTrackerStat } from './engine/adblocker';
+import { runAdblockerMiddleware } from './engine/adblocker';
 import { detectRunningMedia, DetectedMedia } from './engine/mediaSaver';
 import { updateLockScreenMediaSession } from './engine/media';
 import { toggleOledDarkMode, getOledDarkStatus } from './engine/darkMode';
@@ -632,17 +633,34 @@ export default function App() {
     );
   };
 
-  // Pre-flight Link Clinic Security Scanner + Navigation
+  // Pre-flight Adblocker Middleware + Link Clinic Security Scanner + Navigation
   const handleNavigate = (rawUrl: string) => {
     if (!rawUrl) {
       executeNavigate('');
       return;
     }
 
-    const cleanUrl = cleanTrackingParameters(rawUrl);
-    if (cleanUrl !== rawUrl) {
-      incrementTrackerStat(14000);
-      triggerToast('🛡️ Tracking Query Cleanser: Surveillance tokens removed from URL!');
+    const mw = runAdblockerMiddleware({
+      url: rawUrl,
+      resourceType: 'document',
+    });
+
+    if (!mw.allowed) {
+      triggerToast(
+        mw.blockedBy === 'ad'
+          ? '🚫 Blocked by Ads Filtering middleware before loading.'
+          : '🛡️ Blocked by Aggressive Tracker Blocking middleware before loading.'
+      );
+      return;
+    }
+
+    const cleanUrl = mw.cleanedUrl;
+    if (mw.strippedParams.length > 0 || mw.unwrappedRedirect) {
+      triggerToast(
+        `🛡️ Privacy Middleware: Cleaned ${
+          mw.strippedParams.length > 0 ? `${mw.strippedParams.length} tracking tokens` : 'tracking redirect'
+        } from URL!`
+      );
     }
 
     // Link Clinic Pre-Flight Audit
@@ -730,7 +748,20 @@ export default function App() {
 
   const handleUrlChangeFromFrame = (newUrl: string, targetTabId?: string) => {
     const idToUpdate = targetTabId || activeTabId;
-    const cleanUrl = cleanTrackingParameters(newUrl);
+    const mw = runAdblockerMiddleware({
+      url: newUrl,
+      resourceType: 'document',
+      recordStats: false,
+    });
+    if (!mw.allowed) {
+      triggerToast(
+        mw.blockedBy === 'ad'
+          ? '🚫 Ads Filtering blocked a frame navigation attempt.'
+          : '🛡️ Aggressive Tracker Blocking stopped a tracker navigation attempt.'
+      );
+      return;
+    }
+    const cleanUrl = mw.cleanedUrl;
     if (!cleanUrl) return;
 
     addBrowsingHistory(cleanUrl);
@@ -1147,7 +1178,11 @@ export default function App() {
         onOpenHistory={() => openSettings('history')}
         onOpenDeleteData={() => setIsClearDataOpen(true)}
         onOpenSiteControls={() => setIsSiteControlsOpen(true)}
-        onOpenDownloads={() => setIsDownloadsOpen(true)}
+        onOpenDownloads={() => {
+          if (!openAndroidDownloadsHub()) {
+            setIsDownloadsOpen(true);
+          }
+        }}
         onOpenBookmarks={() => openSettings('vault')}
         onOpenRecentTabs={() => setIsTabSwitcherOpen(true)}
         onShare={() => handleShare()}
@@ -1249,7 +1284,11 @@ export default function App() {
             initialTab={settingsTab}
             isOledDark={isOledDark}
             onToggleOledDark={handleToggleOledDark}
-            onOpenDownloads={() => setIsDownloadsOpen(true)}
+            onOpenDownloads={() => {
+            if (!openAndroidDownloadsHub()) {
+              setIsDownloadsOpen(true);
+            }
+          }}
             onTranslatePage={handleTranslateWebPage}
             onToast={triggerToast}
             currentUrl={activeTab.url}

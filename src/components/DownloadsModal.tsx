@@ -146,6 +146,7 @@ export const DownloadsModal: React.FC<DownloadsModalProps> = ({
         ) : (
           filtered.map((file) => {
             const isPlaying = playingId === file.id;
+            const isApk = file.title.toLowerCase().endsWith('.apk');
             return (
               <div
                 key={file.id}
@@ -153,16 +154,23 @@ export const DownloadsModal: React.FC<DownloadsModalProps> = ({
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3 min-w-0 pr-2">
-                    <div className="w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center shrink-0 text-cyan-400">
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${isApk ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-500/30' : 'bg-slate-800 text-cyan-400'}`}>
                       {file.type === 'video' && <Video className="w-5 h-5" />}
                       {file.type === 'audio' && <Music className="w-5 h-5" />}
                       {(file.type === 'pdf' || file.type === 'doc') && (
-                        <FileText className="w-5 h-5" />
+                        isApk ? <Download className="w-5 h-5" /> : <FileText className="w-5 h-5" />
                       )}
                     </div>
 
                     <div className="truncate">
-                      <p className="text-xs font-bold text-slate-200 truncate">{file.title}</p>
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-xs font-bold text-slate-200 truncate">{file.title}</p>
+                        {isApk && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-emerald-950 text-emerald-300 border border-emerald-500/40 shrink-0">
+                            APK
+                          </span>
+                        )}
+                      </div>
                       <p className="text-[10px] text-slate-400">
                         {file.size} · {file.date}
                       </p>
@@ -171,7 +179,16 @@ export const DownloadsModal: React.FC<DownloadsModalProps> = ({
 
                   {/* Action Buttons */}
                   <div className="flex items-center gap-1.5 shrink-0">
-                    {file.type === 'pdf' || file.type === 'doc' ? (
+                    {isApk ? (
+                      <a
+                        href={file.url}
+                        download={file.title}
+                        onClick={() => onToast(`📦 ইনস্টলার খোলা হচ্ছে: ${file.title}`)}
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-colors cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" /> Install APK
+                      </a>
+                    ) : file.type === 'pdf' || file.type === 'doc' ? (
                       <button
                         type="button"
                         onClick={() => {

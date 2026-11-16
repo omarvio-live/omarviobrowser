@@ -15,7 +15,13 @@
  * 4. Native Download Observer capturing all downloads across app & sandboxed frames.
  */
 
-import { incrementTrackerStat } from './adblocker';
+import {
+  getPrivacyFilterSettings,
+  incrementTrackerStat,
+  isAdUrl,
+  isTrackerUrl,
+  runAdblockerMiddleware,
+} from './adblocker';
 import { addLocalDownload, SavedDownloadItem, getLocalDownloads } from './mediaSaver';
 
 // Clean browser spoofed Chrome User-Agent strings
@@ -109,23 +115,45 @@ export interface ResourceClassification {
  */
 export function classifyResource(url: string): ResourceClassification {
   const lower = url.toLowerCase();
+  const privacy = getPrivacyFilterSettings();
 
-  // 1. Check if known tracker or surveillance network
+  // 1. Check via adblocker classifier honoring active Privacy Settings toggles & block-lists
+  if (privacy.adsFiltering && isAdUrl(url, privacy.enabledLists)) {
+    return {
+      level: 'blocked',
+      category: 'tracker',
+      reason: 'Ad-network request blocked by Ads Filtering middleware',
+    };
+  }
+  if (privacy.aggressiveTrackerBlocking && isTrackerUrl(url, privacy.enabledLists)) {
+    return {
+      level: 'blocked',
+      category: 'tracker',
+      reason: 'Telemetry/analytics request blocked by Aggressive Tracker Blocking middleware',
+    };
+  }
+
+  // Check remaining non-essential script patterns
   for (const pattern of NON_ESSENTIAL_SCRIPT_PATTERNS) {
     if (lower.includes(pattern)) {
-      // If it is pure telemetry or ad network, block it
       if (
-        lower.includes('doubleclick') ||
-        lower.includes('pagead2') ||
-        lower.includes('adservice') ||
-        lower.includes('google-analytics') ||
-        lower.includes('telemetry') ||
-        lower.includes('fbevents')
+        privacy.adsFiltering &&
+        (lower.includes('doubleclick') || lower.includes('pagead2') || lower.includes('adservice'))
       ) {
         return {
           level: 'blocked',
           category: 'tracker',
-          reason: `Surveillance/ad tracker identified (${pattern})`,
+          reason: `Ad network blocked (${pattern})`,
+        };
+      }
+      if (
+        privacy.aggressiveTrackerBlocking &&
+        (lower.includes('google-analytics') || lower.includes('telemetry') || lower.includes('fbevents'))
+      ) {
+        return {
+          level: 'blocked',
+          category: 'tracker',
+          reason: `Surveillance tracker blocked (${pattern})`,
         };
       }
       // Otherwise mark as non-essential third-party script to be throttled
@@ -185,12 +213,25 @@ class ResourceThrottleManager {
   private lowPriorityQueue: Array<() => void> = [];
 
   /**
-   * Executes a fetch request with resource-aware prioritization and throttling
+   * Executes a fetch request with pre-flight adblocker middleware, prioritization, and throttling
    */
   public async fetchThrottled(targetUrl: string, init?: RequestInit): Promise<Response> {
-    const classification = classifyResource(targetUrl);
+    const mw = runAdblockerMiddleware({
+      url: targetUrl,
+      resourceType: 'fetch',
+    });
 
-    // Blocked trackers: Drop immediately, register stats, and return empty 204
+    if (!mw.allowed) {
+      return new Response(null, {
+        status: 204,
+        statusText: mw.reason || 'Blocked by OmarVio Adblocker Middleware',
+      });
+    }
+
+    const cleanTargetUrl = mw.cleanedUrl;
+    const classification = classifyResource(cleanTargetUrl);
+
+    // Blocked trackers/ads: Drop immediately, register stats, and return empty 204
     if (classification.level === 'blocked') {
       incrementTrackerStat(16500);
       return new Response(null, {
@@ -211,12 +252,12 @@ class ResourceThrottleManager {
       if ('priority' in Request.prototype) {
         (criticalInit as any).priority = 'high';
       }
-      return fetch(targetUrl, criticalInit);
+      return fetch(cleanTargetUrl, criticalInit);
     }
 
     // Standard resources: Execute with default priority
     if (classification.level === 'standard') {
-      return fetch(targetUrl, init);
+      return fetch(cleanTargetUrl, init);
     }
 
     // Low-priority / non-essential scripts: Throttle via concurrency gate
@@ -232,7 +273,7 @@ class ResourceThrottleManager {
       if ('priority' in Request.prototype) {
         (throttledInit as any).priority = 'low';
       }
-      return await fetch(targetUrl, throttledInit);
+      return await fetch(cleanTargetUrl, throttledInit);
     } finally {
       this.releaseLowPriorityGate();
     }
