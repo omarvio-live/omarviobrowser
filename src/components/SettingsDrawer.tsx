@@ -38,9 +38,26 @@ import {
   Key,
   Upload,
   History as HistoryIcon,
+  BatteryCharging,
+  Activity,
+  Power,
+  PauseCircle,
 } from 'lucide-react';
+import type { Tab } from '../types/browser';
+import {
+  getRealtimeProcessMemorySnapshot,
+  ProcessMemorySnapshot,
+} from '../engine/metrics';
 import { SUPPORTED_LANGUAGES, LanguageCode, getLanguage, setLanguage, t } from '../engine/i18n';
-import { encryptData, createEncryptedVaultBackup, restoreEncryptedVaultBackup } from '../engine/vault';
+import {
+  encryptData,
+  createEncryptedVaultBackup,
+  restoreEncryptedVaultBackup,
+  hasVaultPin,
+  setVaultPin,
+  verifyVaultPin,
+  clearVaultPin,
+} from '../engine/vault';
 import {
   getBrowsingHistory,
   deleteHistoryItem,
@@ -71,8 +88,22 @@ import {
   PrivacyFilterSettings,
   ADBLOCK_FILTER_LISTS,
   AdblockListId,
+  getAllowedHttpHosts,
+  revokeHttpHost,
+  clearAllAllowedHttpHosts,
+  subscribeHttpExceptions,
+  getFilterListSyncMeta,
+  refreshDynamicFilterLists,
+  FilterListSyncMeta,
 } from '../engine/adblocker';
-import { syncPrivacyConfigWithAndroid } from '../engine/nativeBridge';
+import {
+  syncPrivacyConfigWithAndroid,
+  syncSearchEngineWithAndroid,
+  fetchLiveApkReleaseStatus,
+  ApkReleaseStatus,
+  triggerAndroidAppUpdateCheck,
+  isAndroidNativeShell,
+} from '../engine/nativeBridge';
 
 export type SettingsTabId =
   | 'general'
@@ -205,6 +236,15 @@ interface SettingsDrawerProps {
   onToast: (msg: string) => void;
   currentUrl?: string;
   onNavigate?: (url: string) => void;
+  tabs?: Tab[];
+  aliveTabIds?: string[];
+  activeTabId?: string;
+  activeMediaUrl?: string | null;
+  energySaverEnabled?: boolean;
+  onToggleEnergySaver?: () => void;
+  onSleepTab?: (tabId: string) => void;
+  onSleepAllBackgroundTabs?: () => void;
+  onCloseTab?: (tabId: string) => void;
 }
 
 export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
@@ -218,9 +258,20 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   onToast,
   currentUrl = '',
   onNavigate,
+  tabs = [],
+  aliveTabIds = [],
+  activeTabId = '',
+  activeMediaUrl = null,
+  energySaverEnabled = false,
+  onToggleEnergySaver,
+  onSleepTab,
+  onSleepAllBackgroundTabs,
+  onCloseTab,
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab);
   const [currentLang, setCurrentLangState] = useState<LanguageCode>(getLanguage);
+  const [apkStatus, setApkStatus] = useState<ApkReleaseStatus | null>(null);
+  const [memorySnapshot, setMemorySnapshot] = useState<ProcessMemorySnapshot | null>(null);
 
   // Sync activeTab whenever the drawer opens or initialTab changes
   useEffect(() => {
@@ -228,6 +279,34 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
       setActiveTab(initialTab);
     }
   }, [isOpen, initialTab]);
+
+  // Fetch live APK release status when drawer opens
+  useEffect(() => {
+    if (!isOpen) return;
+    fetchLiveApkReleaseStatus().then((live) => {
+      if (live) setApkStatus(live);
+    });
+  }, [isOpen]);
+
+  // Real-time Energy Saver & Process Memory Dashboard polling
+  useEffect(() => {
+    if (!isOpen) return;
+    const refreshMemory = () => {
+      setMemorySnapshot(
+        getRealtimeProcessMemorySnapshot(
+          tabs,
+          aliveTabIds,
+          activeTabId,
+          activeMediaUrl,
+          energySaverEnabled
+        )
+      );
+    };
+    refreshMemory();
+    const intervalMs = energySaverEnabled ? 2500 : 1500;
+    const timer = window.setInterval(refreshMemory, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [isOpen, tabs, aliveTabIds, activeTabId, activeMediaUrl, energySaverEnabled]);
 
   // Browsing History State
   const [historyItems, setHistoryItems] = useState<HistoryItem[]>(getBrowsingHistory);
@@ -347,15 +426,39 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   // Core Adblocker Middleware, HTTPS-Only & Granular Block-Lists
   const [privacyFilters, setPrivacyFilters] = useState<PrivacyFilterSettings>(getPrivacyFilterSettings);
   const [adblockStats, setAdblockStats] = useState(getAdblockStats);
+  const [httpExceptions, setHttpExceptions] = useState<string[]>(getAllowedHttpHosts);
+  const [filterSyncMeta, setFilterSyncMeta] = useState<FilterListSyncMeta>(getFilterListSyncMeta);
+  const [isSyncingLists, setIsSyncingLists] = useState(false);
+
+  // Vault PIN Lock State
+  const [vaultPinConfigured, setVaultPinConfigured] = useState<boolean>(hasVaultPin);
+  const [vaultUnlocked, setVaultUnlocked] = useState<boolean>(() => !hasVaultPin());
+  const [vaultPinInput, setVaultPinInput] = useState('');
+  const [newVaultPinInput, setNewVaultPinInput] = useState('');
 
   useEffect(() => {
     const unsubFilters = subscribePrivacyFilterSettings(setPrivacyFilters);
     const unsubStats = subscribeAdblockStats(setAdblockStats);
+    const unsubHttp = subscribeHttpExceptions(setHttpExceptions);
     return () => {
       unsubFilters();
       unsubStats();
+      unsubHttp();
     };
   }, []);
+
+  useEffect(() => {
+    if (isOpen) {
+      setHttpExceptions(getAllowedHttpHosts());
+      setFilterSyncMeta(getFilterListSyncMeta());
+      const pinExists = hasVaultPin();
+      setVaultPinConfigured(pinExists);
+      if (!pinExists) setVaultUnlocked(true);
+    } else {
+      if (hasVaultPin()) setVaultUnlocked(false);
+      setVaultPinInput('');
+    }
+  }, [isOpen]);
 
   const handleTogglePrivacyFilter = (
     key: 'aggressiveTrackerBlocking' | 'adsFiltering' | 'httpsOnlyMode'
@@ -459,13 +562,10 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   const [showE2eePanel, setShowE2eePanel] = useState(false);
   const [isExportingE2ee, setIsExportingE2ee] = useState(false);
 
-  useEffect(() => {
-    if (isOpen && initialTab) {
-      setActiveTab(initialTab);
-    }
-  }, [isOpen, initialTab]);
-
   if (!isOpen) return null;
+
+  const liveVersion = apkStatus?.version || '2.0.0.14';
+  const directApkUrl = apkStatus?.directApkUrl || '/api/download-apk?direct=1';
 
   const handleLanguageChange = (lang: LanguageCode) => {
     setLanguage(lang);
@@ -475,6 +575,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
 
   const handleSelectEngine = (engineId: string) => {
     setSelectedEngine(engineId);
+    syncSearchEngineWithAndroid(engineId);
     try {
       localStorage.setItem('omarvio_search_engine', engineId);
     } catch {}
@@ -591,7 +692,13 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   };
 
   const handleOpenTelegram = () => {
-    window.open(OFFICIAL_TELEGRAM_LINK, '_blank');
+    const a = document.createElement('a');
+    a.href = OFFICIAL_TELEGRAM_LINK;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
     onToast('🚀 টেলিগ্রাম চ্যানেল খোলা হচ্ছে...');
   };
 
@@ -619,7 +726,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
       `ব্যবহারকারীর যোগাযোগ: ${feedbackContact.trim() || 'Anonymous'}\n\n` +
       `বিস্তারিত মতামত:\n${feedbackMessage.trim()}\n\n` +
       `-----------------------------------------\n` +
-      `OMARVIO BROWSER v1.0.0 (OMARVIO GLOBAL LTD.)`
+      `OMARVIO BROWSER v${liveVersion} (OMARVIO GLOBAL LTD.)`
     );
 
     // Save to local feedback history
@@ -736,6 +843,165 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                 <p className="text-xs font-bold text-cyan-200 italic leading-snug">
                   {t('slogan')}
                 </p>
+              </div>
+
+              {/* ========================================================= */}
+              {/* ENERGY SAVER TOGGLE & REAL-TIME DASHBOARD WIDGET          */}
+              {/* ========================================================= */}
+              <div className="p-3.5 rounded-2xl bg-slate-900/90 border border-emerald-500/30 space-y-3 shadow-md">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                      <BatteryCharging className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>এনার্জি সেভার মোড (Energy Saver)</span>
+                    </p>
+                    <p className="text-[10px] text-slate-400 leading-tight mt-0.5">
+                      স্লিপিং ট্যাবের ব্যাকগ্রাউন্ড প্রসেস সীমিত করে ও অপ্রয়োজনীয় UI অ্যানিমেশন কমায়
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={energySaverEnabled}
+                    onClick={() => onToggleEnergySaver?.()}
+                    className={`w-10 h-5 flex items-center rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${
+                      energySaverEnabled ? 'bg-emerald-500' : 'bg-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform ${
+                        energySaverEnabled ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {/* Real-Time Process Memory Bar */}
+                {memorySnapshot && (
+                  <div className="p-2.5 rounded-xl bg-slate-950/80 border border-slate-800/90 space-y-2">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-slate-300 font-semibold flex items-center gap-1.5">
+                        <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>রিয়েল-টাইম প্রসেস মেমোরি</span>
+                      </span>
+                      <span className="font-mono font-bold text-emerald-300 tabular-nums">
+                        {memorySnapshot.isLiveHeapApi
+                          ? `${memorySnapshot.usedHeapMB} / ${memorySnapshot.heapLimitMB} MB`
+                          : `~${memorySnapshot.totalProcessMB} MB (${memorySnapshot.estimatedTabsMB} MB Tabs)`}
+                      </span>
+                    </div>
+
+                    <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-300 ${
+                          memorySnapshot.percentUsed > 75
+                            ? 'bg-rose-500'
+                            : memorySnapshot.percentUsed > 45
+                            ? 'bg-amber-400'
+                            : 'bg-emerald-400'
+                        }`}
+                        style={{ width: `${Math.max(8, Math.min(100, memorySnapshot.percentUsed))}%` }}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 tabular-nums">
+                      <span>সক্রিয় ট্যাব: {memorySnapshot.aliveCount}</span>
+                      <span>💤 স্লিপিং ট্যাব: {memorySnapshot.sleepingCount}</span>
+                      <span>
+                        {energySaverEnabled ? '⚡ ইকো থ্রটলিং চালু' : '🚀 নরমাল পাওয়ার'}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Sleep All Background Tabs Bulk Action */}
+                {onSleepAllBackgroundTabs && (
+                  <button
+                    type="button"
+                    onClick={onSleepAllBackgroundTabs}
+                    disabled={!tabs.some((tabItem) => tabItem.id !== activeTabId && Boolean(tabItem.url) && !tabItem.isSleeping && aliveTabIds.includes(tabItem.id))}
+                    className="w-full py-2 px-3 rounded-xl bg-emerald-950/60 hover:bg-emerald-900/70 disabled:opacity-45 disabled:cursor-not-allowed border border-emerald-500/35 text-emerald-200 text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-98"
+                  >
+                    <PauseCircle className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>সব ব্যাকগ্রাউন্ড ট্যাব স্লিপ করুন (ব্যাটারি বাঁচান)</span>
+                  </button>
+                )}
+
+                {/* High-Energy & Loaded Tabs Monitor List */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    <span>হাই-এনার্জি ও রানিং ট্যাব তালিকা</span>
+                    <span className="font-mono text-cyan-400">
+                      {memorySnapshot ? `${memorySnapshot.highEnergyCount} হাই-এনার্জি` : '0 হাই-এনার্জি'}
+                    </span>
+                  </div>
+
+                  {memorySnapshot && memorySnapshot.tabProfiles.length > 0 ? (
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto pr-0.5">
+                      {memorySnapshot.tabProfiles.map((profile) => (
+                        <div
+                          key={profile.tabId}
+                          className={`p-2 rounded-xl border flex items-center justify-between gap-2 ${
+                            profile.isHighEnergy
+                              ? 'bg-amber-950/25 border-amber-500/35'
+                              : 'bg-slate-950/70 border-slate-800/80'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[11px] font-bold text-slate-200 truncate">
+                                {profile.title}
+                              </span>
+                              {profile.isHighEnergy && (
+                                <span className="px-1.5 py-0.2 rounded bg-amber-500/20 border border-amber-400/40 text-amber-300 text-[9px] font-bold shrink-0">
+                                  হাই-এনার্জি
+                                </span>
+                              )}
+                              {profile.isSleeping && (
+                                <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[9px] font-bold shrink-0">
+                                  💤 স্লিপিং
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2 text-[10px] text-slate-400 mt-0.5 font-mono tabular-nums">
+                              <span>~{profile.estimatedMB} MB</span>
+                              <span>•</span>
+                              <span className="truncate font-sans">{profile.reasonBn}</span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1 shrink-0">
+                            {!profile.isSleeping && onSleepTab && (
+                              <button
+                                type="button"
+                                onClick={() => onSleepTab(profile.tabId)}
+                                className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-emerald-800/80 text-emerald-300 hover:text-white border border-slate-700 text-[10px] font-bold transition-colors cursor-pointer"
+                                title="ট্যাব স্লিপ করুন (RAM ফ্রি)"
+                              >
+                                স্লিপ
+                              </button>
+                            )}
+                            {onCloseTab && (
+                              <button
+                                type="button"
+                                onClick={() => onCloseTab(profile.tabId)}
+                                className="px-2 py-1 rounded-lg bg-rose-950/60 hover:bg-rose-800 text-rose-300 hover:text-white border border-rose-500/30 text-[10px] font-bold flex items-center gap-0.5 transition-colors cursor-pointer"
+                                title="ট্যাব বন্ধ করুন"
+                              >
+                                <Power className="w-3 h-3" />
+                                <span>বন্ধ</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-slate-500 py-2 text-center bg-slate-950/60 rounded-xl border border-slate-800/60">
+                      এই মুহূর্তে কোনো ভারী ওয়েব ট্যাব লোড নেই (০ MB ব্যাকগ্রাউন্ড প্রসেস)
+                    </p>
+                  )}
+                </div>
               </div>
 
               {/* Default Search Engine */}
@@ -1518,6 +1784,84 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                 </div>
               </div>
 
+              {/* Dynamic Filter List Auto-Updater */}
+              <div className="p-3 rounded-2xl bg-slate-900/90 border border-cyan-500/25 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-slate-100">
+                    ডাইনামিক ফিল্টার লিস্ট সিঙ্ক ({filterSyncMeta.version})
+                  </p>
+                  <p className="text-[10px] text-slate-400 mt-0.5">
+                    সর্বশেষ আপডেট: {filterSyncMeta.syncedAt} · +{filterSyncMeta.extraRuleCount} ডোমেইন রুল
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={isSyncingLists}
+                  onClick={async () => {
+                    setIsSyncingLists(true);
+                    const res = await refreshDynamicFilterLists();
+                    setFilterSyncMeta(res.meta);
+                    setIsSyncingLists(false);
+                    onToast(
+                      res.success
+                        ? `🔄 ফিল্টার লিস্ট আপডেট হয়েছে (${res.meta.version})`
+                        : '⚠️ ফিল্টার লিস্ট আপডেট করা যায়নি'
+                    );
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-bold text-[11px] shrink-0 cursor-pointer transition-colors"
+                >
+                  {isSyncingLists ? 'Syncing...' : 'Update Lists'}
+                </button>
+              </div>
+
+              {/* HTTPS-Only Host Exceptions Manager UI */}
+              <div className="space-y-2 pt-1">
+                <div className="flex items-center justify-between px-0.5">
+                  <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">
+                    HTTPS-Only Host Exceptions ({httpExceptions.length})
+                  </label>
+                  {httpExceptions.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        clearAllAllowedHttpHosts();
+                        onToast('🔒 সকল HTTP অনুমোদন বাতিল করা হয়েছে');
+                      }}
+                      className="text-[10px] font-bold text-rose-400 hover:text-rose-300 cursor-pointer"
+                    >
+                      Clear All
+                    </button>
+                  )}
+                </div>
+
+                {httpExceptions.length === 0 ? (
+                  <p className="text-[11px] text-slate-500 bg-slate-900/50 border border-slate-800/70 rounded-xl px-3 py-2.5">
+                    কোনো অনিরাপদ HTTP সাইটে অনুমতি দেওয়া নেই।
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {httpExceptions.map((host) => (
+                      <div
+                        key={host}
+                        className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-amber-950/20 border border-amber-500/30"
+                      >
+                        <span className="text-xs font-mono text-amber-200 truncate">{host}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            revokeHttpHost(host);
+                            onToast(`🔒 ${host}-এর HTTP অনুমতি বাতিল হয়েছে`);
+                          }}
+                          className="px-2 py-0.5 rounded-lg bg-rose-950 hover:bg-rose-900 text-rose-300 text-[10px] font-bold border border-rose-500/30 shrink-0 cursor-pointer"
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <div className="space-y-2 pt-1">
                 <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block px-0.5">
                   অতিরিক্ত শিল্ড ও সুরক্ষা (Additional Shields)
@@ -1670,149 +2014,243 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                 </div>
               </div>
 
-              {/* Add current webpage */}
-              <button
-                type="button"
-                onClick={handleAddCurrentBookmark}
-                className="w-full flex items-center justify-center gap-2 p-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all shadow-md active:scale-95"
-              >
-                <Bookmark className="w-4 h-4" />
-                <span>বর্তমান পেজটি ভল্টে এনক্রিপ্ট করে রাখুন</span>
-              </button>
-
-              {/* Bookmarks List */}
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block">
-                  সংরক্ষিত নিরাপদ বুকমার্ক ({bookmarks.length})
-                </label>
-
-                {bookmarks.length === 0 ? (
-                  <p className="text-xs text-slate-500 text-center py-6">
-                    আপনার এনক্রিপ্টেড ভল্টে কোনো সংরক্ষিত বুকমার্ক নেই।
-                  </p>
-                ) : (
-                  bookmarks.map((bm) => (
-                    <div
-                      key={bm.id}
-                      className="flex items-center justify-between p-3 rounded-2xl bg-slate-900/80 border border-slate-800 hover:border-slate-700 transition-colors"
-                    >
-                      <div
-                        onClick={() => {
-                          if (onNavigate) {
-                            onNavigate(bm.url);
-                            onClose();
-                          }
-                        }}
-                        className="truncate cursor-pointer flex-1 pr-2"
-                      >
-                        <p className="text-xs font-bold text-slate-200 truncate hover:text-cyan-300 transition-colors">
-                          {bm.title}
-                        </p>
-                        <p className="text-[10px] text-slate-400 truncate font-mono">
-                          {bm.url}
-                        </p>
-                      </div>
-
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-[9px] text-emerald-400 bg-emerald-950/80 border border-emerald-500/30 px-1.5 py-0.5 rounded font-mono">
-                          AES-256
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteBookmark(bm.id)}
-                          className="p-1.5 text-slate-400 hover:text-rose-400 rounded-lg hover:bg-slate-800"
-                          title="মুছে ফেলুন"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-
-              {/* Milestone 16: Decentralized User-Key E2EE Cloud Sync & Backup */}
-              <div className="pt-3 border-t border-slate-800 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Key className="w-4 h-4 text-cyan-400" />
-                    <div>
-                      <h4 className="text-xs font-bold text-slate-100">
-                        ডিসেন্ট্রালাইজড E2EE ক্লাউড সিঙ্ক ও ব্যাকআপ
-                      </h4>
-                      <p className="text-[10px] text-slate-400">
-                        মাইলস্টোন ১৬ • পাসফ্রেজ নির্ভর সামরিক মানের AES-256 ব্যাকআপ
-                      </p>
-                    </div>
-                  </div>
-                  <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950 px-2 py-0.5 rounded border border-cyan-800">
-                    M16 E2EE
-                  </span>
-                </div>
-
-                <div className="p-3 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-2.5">
+              {vaultPinConfigured && !vaultUnlocked ? (
+                <div className="p-5 rounded-2xl bg-slate-900/90 border border-cyan-500/40 text-center space-y-3">
+                  <Lock className="w-8 h-8 text-cyan-400 mx-auto" />
                   <div>
-                    <label className="text-[11px] font-semibold text-slate-300 block mb-1">
-                      আপনার গোপন পাসফ্রেজ (Secret Passphrase):
-                    </label>
-                    <input
-                      type="password"
-                      value={e2eePassphrase}
-                      onChange={(e) => setE2eePassphrase(e.target.value)}
-                      placeholder="পাসফ্রেজ লিখুন (যেমন: MySecretPass2026)"
-                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-cyan-400 font-mono"
-                    />
-                    <p className="text-[9px] text-slate-500 mt-0.5">
-                      PBKDF2 (১০০,০০০ ইটারেশন) দিয়ে কি (Key) তৈরি হবে। সার্ভারে কোনো কপি যাবে না।
+                    <h4 className="text-sm font-bold text-slate-100">প্রাইভেসি ভল্ট লক করা আছে</h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      সংরক্ষিত বুকমার্ক ও E2EE ব্যাকআপ দেখতে আপনার গোপন PIN দিন।
                     </p>
                   </div>
-
-                  {/* Export & Import Action Buttons */}
-                  <div className="grid grid-cols-2 gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={handleExportE2eeBackup}
-                      disabled={isExportingE2ee}
-                      className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-cyan-950/80 hover:bg-cyan-900 border border-cyan-500/40 text-cyan-200 text-xs font-bold transition-all active:scale-95 cursor-pointer shadow-sm"
-                    >
-                      <Download className="w-3.5 h-3.5 text-cyan-400" />
-                      <span>{isExportingE2ee ? 'তৈরি হচ্ছে...' : 'ব্যাকআপ এক্সপোর্ট (.omarvio)'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowE2eePanel(!showE2eePanel)}
-                      className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold transition-all active:scale-95 cursor-pointer shadow-sm"
-                    >
-                      <Upload className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>ব্যাকআপ রিস্টোর করুন</span>
-                    </button>
-                  </div>
-
-                  {/* Restore Input Panel */}
-                  {showE2eePanel && (
-                    <div className="mt-2 p-2.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 animate-fadeIn">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                        .omarvio ব্যাকআপ ফাইল কনটেন্ট পেস্ট করুন:
-                      </label>
-                      <textarea
-                        rows={3}
-                        value={restoreCipherInput}
-                        onChange={(e) => setRestoreCipherInput(e.target.value)}
-                        placeholder="এখানে এনক্রিপ্টেড ব্যাকআপ টেক্সট পেস্ট করুন..."
-                        className="w-full p-2 rounded-lg bg-[#070b16] border border-slate-800 text-[10px] text-emerald-300 font-mono focus:outline-none focus:border-cyan-400 resize-none"
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    value={vaultPinInput}
+                    onChange={(e) => setVaultPinInput(e.target.value)}
+                    placeholder="আপনার PIN লিখুন (কমপক্ষে ৪ সংখ্যা)"
+                    className="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-center text-sm text-white font-mono tracking-widest focus:outline-none focus:border-cyan-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const ok = await verifyVaultPin(vaultPinInput);
+                      if (ok) {
+                        setVaultUnlocked(true);
+                        setVaultPinInput('');
+                        onToast('🔓 ভল্ট আনলক হয়েছে');
+                      } else {
+                        onToast('❌ ভুল PIN! আবার চেষ্টা করুন');
+                      }
+                    }}
+                    className="w-full py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs cursor-pointer"
+                  >
+                    ভল্ট আনলক করুন
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {/* Vault PIN Lock Setup / Management */}
+                  <div className="p-3 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-xs font-bold text-slate-100">
+                          ভল্ট PIN পাসকোড লক (SHA-256)
+                        </p>
+                        <p className="text-[10px] text-slate-400">
+                          {vaultPinConfigured
+                            ? 'সক্রিয়: প্রতিবার Settings খোলার সময় PIN লাগবে।'
+                            : 'নিষ্ক্রিয়: বুকমার্ক ও ব্যাকআপ PIN দিয়ে লক করুন।'}
+                        </p>
+                      </div>
+                      {vaultPinConfigured && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            clearVaultPin();
+                            setVaultPinConfigured(false);
+                            setVaultUnlocked(true);
+                            onToast('🔓 ভল্ট PIN লক সরানো হয়েছে');
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-rose-950 hover:bg-rose-900 border border-rose-500/40 text-rose-300 text-[10px] font-bold cursor-pointer"
+                        >
+                          PIN বন্ধ করুন
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        value={newVaultPinInput}
+                        onChange={(e) => setNewVaultPinInput(e.target.value)}
+                        placeholder={vaultPinConfigured ? 'নতুন PIN দিন (পরিবর্তন)' : '৪+ সংখ্যার নতুন PIN'}
+                        className="flex-1 px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white font-mono focus:outline-none focus:border-cyan-400"
                       />
                       <button
                         type="button"
-                        onClick={handleRestoreE2eeBackup}
-                        className="w-full py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-md"
+                        onClick={async () => {
+                          const ok = await setVaultPin(newVaultPinInput);
+                          if (ok) {
+                            setVaultPinConfigured(true);
+                            setNewVaultPinInput('');
+                            onToast('🔐 ভল্ট PIN সেভ হয়েছে');
+                          } else {
+                            onToast('⚠️ কমপক্ষে ৪ সংখ্যার PIN দিন');
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer shrink-0"
                       >
-                        <ShieldCheck className="w-3.5 h-3.5" />
-                        <span>ডিক্রিপ্ট এবং রিস্টোর সম্পন্ন করুন</span>
+                        PIN সেভ
                       </button>
                     </div>
-                  )}
-                </div>
-              </div>
+                  </div>
+
+                  {/* Add current webpage */}
+                  <button
+                    type="button"
+                    onClick={handleAddCurrentBookmark}
+                    className="w-full flex items-center justify-center gap-2 p-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all shadow-md active:scale-95"
+                  >
+                    <Bookmark className="w-4 h-4" />
+                    <span>বর্তমান পেজটি ভল্টে এনক্রিপ্ট করে রাখুন</span>
+                  </button>
+
+                  {/* Bookmarks List */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block">
+                      সংরক্ষিত নিরাপদ বুকমার্ক ({bookmarks.length})
+                    </label>
+
+                    {bookmarks.length === 0 ? (
+                      <p className="text-xs text-slate-500 text-center py-6">
+                        আপনার এনক্রিপ্টেড ভল্টে কোনো সংরক্ষিত বুকমার্ক নেই।
+                      </p>
+                    ) : (
+                      bookmarks.map((bm) => (
+                        <div
+                          key={bm.id}
+                          className="flex items-center justify-between p-3 rounded-2xl bg-slate-900/80 border border-slate-800 hover:border-slate-700 transition-colors"
+                        >
+                          <div
+                            onClick={() => {
+                              if (onNavigate) {
+                                onNavigate(bm.url);
+                                onClose();
+                              }
+                            }}
+                            className="truncate cursor-pointer flex-1 pr-2"
+                          >
+                            <p className="text-xs font-bold text-slate-200 truncate hover:text-cyan-300 transition-colors">
+                              {bm.title}
+                            </p>
+                            <p className="text-[10px] text-slate-400 truncate font-mono">
+                              {bm.url}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-[9px] text-emerald-400 bg-emerald-950/80 border border-emerald-500/30 px-1.5 py-0.5 rounded font-mono">
+                              AES-256
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteBookmark(bm.id)}
+                              className="p-1.5 text-slate-400 hover:text-rose-400 rounded-lg hover:bg-slate-800"
+                              title="মুছে ফেলুন"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  {/* Milestone 16: Decentralized User-Key E2EE Cloud Sync & Backup */}
+                  <div className="pt-3 border-t border-slate-800 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Key className="w-4 h-4 text-cyan-400" />
+                        <div>
+                          <h4 className="text-xs font-bold text-slate-100">
+                            ডিসেন্ট্রালাইজড E2EE ক্লাউড সিঙ্ক ও ব্যাকআপ
+                          </h4>
+                          <p className="text-[10px] text-slate-400">
+                            মাইলস্টোন ১৬ • পাসফ্রেজ নির্ভর সামরিক মানের AES-256 ব্যাকআপ
+                          </p>
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950 px-2 py-0.5 rounded border border-cyan-800">
+                        M16 E2EE
+                      </span>
+                    </div>
+
+                    <div className="p-3 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-2.5">
+                      <div>
+                        <label className="text-[11px] font-semibold text-slate-300 block mb-1">
+                          আপনার গোপন পাসফ্রেজ (Secret Passphrase):
+                        </label>
+                        <input
+                          type="password"
+                          value={e2eePassphrase}
+                          onChange={(e) => setE2eePassphrase(e.target.value)}
+                          placeholder="পাসফ্রেজ লিখুন (যেমন: MySecretPass2026)"
+                          className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-cyan-400 font-mono"
+                        />
+                        <p className="text-[9px] text-slate-500 mt-0.5">
+                          PBKDF2 (১০০,০০০ ইটারেশন) দিয়ে কি (Key) তৈরি হবে। সার্ভারে কোনো কপি যাবে না।
+                        </p>
+                      </div>
+
+                      {/* Export & Import Action Buttons */}
+                      <div className="grid grid-cols-2 gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={handleExportE2eeBackup}
+                          disabled={isExportingE2ee}
+                          className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-cyan-950/80 hover:bg-cyan-900 border border-cyan-500/40 text-cyan-200 text-xs font-bold transition-all active:scale-95 cursor-pointer shadow-sm"
+                        >
+                          <Download className="w-3.5 h-3.5 text-cyan-400" />
+                          <span>{isExportingE2ee ? 'তৈরি হচ্ছে...' : 'ব্যাকআপ এক্সপোর্ট (.omarvio)'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowE2eePanel(!showE2eePanel)}
+                          className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold transition-all active:scale-95 cursor-pointer shadow-sm"
+                        >
+                          <Upload className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>ব্যাকআপ রিস্টোর করুন</span>
+                        </button>
+                      </div>
+
+                      {/* Restore Input Panel */}
+                      {showE2eePanel && (
+                        <div className="mt-2 p-2.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 animate-fadeIn">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                            .omarvio ব্যাকআপ ফাইল কনটেন্ট পেস্ট করুন:
+                          </label>
+                          <textarea
+                            rows={3}
+                            value={restoreCipherInput}
+                            onChange={(e) => setRestoreCipherInput(e.target.value)}
+                            placeholder="এখানে এনক্রিপ্টেড ব্যাকআপ টেক্সট পেস্ট করুন..."
+                            className="w-full p-2 rounded-lg bg-[#070b16] border border-slate-800 text-[10px] text-emerald-300 font-mono focus:outline-none focus:border-cyan-400 resize-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleRestoreE2eeBackup}
+                            className="w-full py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-md"
+                          >
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                            <span>ডিক্রিপ্ট এবং রিস্টোর সম্পন্ন করুন</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
 
@@ -2021,6 +2459,34 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                 </button>
               </div>
 
+              {/* Compact Energy Saver Quick Toggle inside Display & Theme */}
+              <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-900/80 border border-emerald-500/25">
+                <div className="min-w-0 pr-2">
+                  <p className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                    <BatteryCharging className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>UI অ্যানিমেশন কমান ও এনার্জি সেভার</span>
+                  </p>
+                  <p className="text-[10px] text-slate-400 leading-tight mt-0.5">
+                    ব্লার ইফেক্ট ও অপ্রয়োজনীয় অ্যানিমেশন কমিয়ে ব্যাটারি ও GPU বাঁচায়
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={energySaverEnabled}
+                  onClick={() => onToggleEnergySaver?.()}
+                  className={`w-9 h-5 flex items-center rounded-full p-0.5 transition-colors cursor-pointer ${
+                    energySaverEnabled ? 'bg-emerald-500' : 'bg-slate-700'
+                  }`}
+                >
+                  <div
+                    className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform ${
+                      energySaverEnabled ? 'translate-x-4' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
               {/* Language Selection */}
               <div>
                 <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block mb-2">
@@ -2097,7 +2563,35 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   OMARVIO BROWSER
                 </h3>
                 <p className="text-xs font-bold text-cyan-400">OMARVIO GLOBAL LTD.</p>
-                <p className="text-[10px] text-slate-400 font-mono mt-0.5">Version 1.0.0 (Production Release)</p>
+                <p className="text-[10px] text-emerald-300 font-mono mt-0.5">
+                  Version {liveVersion} (Latest Production Release)
+                </p>
+
+                <div className="w-full mt-3">
+                  {isAndroidNativeShell() ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!triggerAndroidAppUpdateCheck()) {
+                          window.location.href = directApkUrl;
+                        }
+                      }}
+                      className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-md transition-all active:scale-95 cursor-pointer"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>আপডেট চেক ও ইনস্টল করুন (v{liveVersion})</span>
+                    </button>
+                  ) : (
+                    <a
+                      href={directApkUrl}
+                      download="omarvio-browser.apk"
+                      className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-md transition-all active:scale-95 cursor-pointer"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>সর্বশেষ APK আপডেট ডাউনলোড করুন (v{liveVersion})</span>
+                    </a>
+                  )}
+                </div>
               </div>
 
               <div className="p-3.5 rounded-2xl bg-blue-950/50 border border-cyan-500/30 text-left space-y-2 text-xs text-slate-300 leading-relaxed">

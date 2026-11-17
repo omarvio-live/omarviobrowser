@@ -3,8 +3,49 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
-import { X, Sliders, Shield, Cookie, Eye, Lock, RefreshCw, Check } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Sliders, RefreshCw } from 'lucide-react';
+import { syncThirdPartyCookieBlockWithAndroid, syncPrivacyConfigWithAndroid } from '../engine/nativeBridge';
+import { getPrivacyFilterSettings, setPrivacyFilterSettings } from '../engine/adblocker';
+
+interface SiteControlConfig {
+  blockThirdPartyCookies: boolean;
+  blockTrackers: boolean;
+  allowJavaScript: boolean;
+  blockPopups: boolean;
+  fingerprintResist: boolean;
+}
+
+const DEFAULT_SITE_CONTROL: SiteControlConfig = {
+  blockThirdPartyCookies: true,
+  blockTrackers: true,
+  allowJavaScript: true,
+  blockPopups: true,
+  fingerprintResist: true,
+};
+
+const STORAGE_KEY = 'omarvio_site_controls_v1';
+
+function loadSiteControlsMap(): Record<string, SiteControlConfig> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') return parsed;
+    }
+  } catch {}
+  return {};
+}
+
+function saveSiteControlForHost(host: string, cfg: SiteControlConfig): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const map = loadSiteControlsMap();
+    map[host] = cfg;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
+  } catch {}
+}
 
 interface SiteControlsModalProps {
   isOpen: boolean;
@@ -19,28 +60,54 @@ export const SiteControlsModal: React.FC<SiteControlsModalProps> = ({
   currentUrl,
   onToast,
 }) => {
-  const [blockThirdPartyCookies, setBlockThirdPartyCookies] = useState(true);
-  const [blockTrackers, setBlockTrackers] = useState(true);
-  const [allowJavaScript, setAllowJavaScript] = useState(true);
-  const [blockPopups, setBlockPopups] = useState(true);
-  const [fingerprintResist, setFingerprintResist] = useState(true);
-
-  if (!isOpen) return null;
-
   const hostname = (() => {
     try {
-      return currentUrl ? new URL(currentUrl).hostname : 'this site';
+      return currentUrl ? new URL(currentUrl.startsWith('http') ? currentUrl : `https://${currentUrl}`).hostname : 'default-shield';
     } catch {
-      return 'this site';
+      return 'default-shield';
     }
   })();
 
+  const [config, setConfig] = useState<SiteControlConfig>(DEFAULT_SITE_CONTROL);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const saved = loadSiteControlsMap()[hostname];
+    const globalFilters = getPrivacyFilterSettings();
+    setConfig({
+      blockThirdPartyCookies: saved?.blockThirdPartyCookies ?? DEFAULT_SITE_CONTROL.blockThirdPartyCookies,
+      blockTrackers: saved?.blockTrackers ?? globalFilters.aggressiveTrackerBlocking,
+      allowJavaScript: saved?.allowJavaScript ?? DEFAULT_SITE_CONTROL.allowJavaScript,
+      blockPopups: saved?.blockPopups ?? DEFAULT_SITE_CONTROL.blockPopups,
+      fingerprintResist: saved?.fingerprintResist ?? DEFAULT_SITE_CONTROL.fingerprintResist,
+    });
+  }, [isOpen, hostname]);
+
+  if (!isOpen) return null;
+
+  const updateKey = (key: keyof SiteControlConfig, nextVal: boolean) => {
+    const nextConfig = { ...config, [key]: nextVal };
+    setConfig(nextConfig);
+    saveSiteControlForHost(hostname, nextConfig);
+
+    if (key === 'blockThirdPartyCookies') {
+      syncThirdPartyCookieBlockWithAndroid(nextVal);
+    } else if (key === 'blockTrackers') {
+      const updated = setPrivacyFilterSettings({ aggressiveTrackerBlocking: nextVal });
+      syncPrivacyConfigWithAndroid(updated);
+    } else if (key === 'fingerprintResist') {
+      try {
+        localStorage.setItem('omarvio_fingerprint_shield', String(nextVal));
+      } catch {}
+    }
+  };
+
   const handleReset = () => {
-    setBlockThirdPartyCookies(true);
-    setBlockTrackers(true);
-    setAllowJavaScript(true);
-    setBlockPopups(true);
-    setFingerprintResist(true);
+    setConfig(DEFAULT_SITE_CONTROL);
+    saveSiteControlForHost(hostname, DEFAULT_SITE_CONTROL);
+    syncThirdPartyCookieBlockWithAndroid(true);
+    const updated = setPrivacyFilterSettings({ aggressiveTrackerBlocking: true });
+    syncPrivacyConfigWithAndroid(updated);
     onToast(`🛡️ Site controls reset to Omarvio Shield defaults for ${hostname}`);
   };
 
@@ -61,7 +128,7 @@ export const SiteControlsModal: React.FC<SiteControlsModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-full text-[#c4c7c5] hover:text-white hover:bg-[#3c4043] transition-colors"
+            className="p-1.5 rounded-full text-[#c4c7c5] hover:text-white hover:bg-[#3c4043] transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -77,14 +144,14 @@ export const SiteControlsModal: React.FC<SiteControlsModalProps> = ({
             </div>
             <button
               type="button"
-              onClick={() => setBlockThirdPartyCookies(!blockThirdPartyCookies)}
+              onClick={() => updateKey('blockThirdPartyCookies', !config.blockThirdPartyCookies)}
               className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${
-                blockThirdPartyCookies ? 'bg-cyan-500' : 'bg-[#5f6368]'
+                config.blockThirdPartyCookies ? 'bg-cyan-500' : 'bg-[#5f6368]'
               }`}
             >
               <div
                 className={`w-5 h-5 rounded-full bg-white transition-transform transform ${
-                  blockThirdPartyCookies ? 'translate-x-5' : 'translate-x-0.5'
+                  config.blockThirdPartyCookies ? 'translate-x-5' : 'translate-x-0.5'
                 }`}
               />
             </button>
@@ -98,14 +165,14 @@ export const SiteControlsModal: React.FC<SiteControlsModalProps> = ({
             </div>
             <button
               type="button"
-              onClick={() => setBlockTrackers(!blockTrackers)}
+              onClick={() => updateKey('blockTrackers', !config.blockTrackers)}
               className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${
-                blockTrackers ? 'bg-cyan-500' : 'bg-[#5f6368]'
+                config.blockTrackers ? 'bg-cyan-500' : 'bg-[#5f6368]'
               }`}
             >
               <div
                 className={`w-5 h-5 rounded-full bg-white transition-transform transform ${
-                  blockTrackers ? 'translate-x-5' : 'translate-x-0.5'
+                  config.blockTrackers ? 'translate-x-5' : 'translate-x-0.5'
                 }`}
               />
             </button>
@@ -119,14 +186,14 @@ export const SiteControlsModal: React.FC<SiteControlsModalProps> = ({
             </div>
             <button
               type="button"
-              onClick={() => setAllowJavaScript(!allowJavaScript)}
+              onClick={() => updateKey('allowJavaScript', !config.allowJavaScript)}
               className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${
-                allowJavaScript ? 'bg-cyan-500' : 'bg-[#5f6368]'
+                config.allowJavaScript ? 'bg-cyan-500' : 'bg-[#5f6368]'
               }`}
             >
               <div
                 className={`w-5 h-5 rounded-full bg-white transition-transform transform ${
-                  allowJavaScript ? 'translate-x-5' : 'translate-x-0.5'
+                  config.allowJavaScript ? 'translate-x-5' : 'translate-x-0.5'
                 }`}
               />
             </button>
@@ -140,14 +207,14 @@ export const SiteControlsModal: React.FC<SiteControlsModalProps> = ({
             </div>
             <button
               type="button"
-              onClick={() => setBlockPopups(!blockPopups)}
+              onClick={() => updateKey('blockPopups', !config.blockPopups)}
               className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${
-                blockPopups ? 'bg-cyan-500' : 'bg-[#5f6368]'
+                config.blockPopups ? 'bg-cyan-500' : 'bg-[#5f6368]'
               }`}
             >
               <div
                 className={`w-5 h-5 rounded-full bg-white transition-transform transform ${
-                  blockPopups ? 'translate-x-5' : 'translate-x-0.5'
+                  config.blockPopups ? 'translate-x-5' : 'translate-x-0.5'
                 }`}
               />
             </button>
@@ -161,14 +228,14 @@ export const SiteControlsModal: React.FC<SiteControlsModalProps> = ({
             </div>
             <button
               type="button"
-              onClick={() => setFingerprintResist(!fingerprintResist)}
+              onClick={() => updateKey('fingerprintResist', !config.fingerprintResist)}
               className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${
-                fingerprintResist ? 'bg-cyan-500' : 'bg-[#5f6368]'
+                config.fingerprintResist ? 'bg-cyan-500' : 'bg-[#5f6368]'
               }`}
             >
               <div
                 className={`w-5 h-5 rounded-full bg-white transition-transform transform ${
-                  fingerprintResist ? 'translate-x-5' : 'translate-x-0.5'
+                  config.fingerprintResist ? 'translate-x-5' : 'translate-x-0.5'
                 }`}
               />
             </button>
@@ -187,7 +254,8 @@ export const SiteControlsModal: React.FC<SiteControlsModalProps> = ({
           <button
             type="button"
             onClick={() => {
-              onToast(`✅ Site controls updated for ${hostname}`);
+              saveSiteControlForHost(hostname, config);
+              onToast(`✅ Site controls saved & applied for ${hostname}`);
               onClose();
             }}
             className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shadow-md transition-colors cursor-pointer"

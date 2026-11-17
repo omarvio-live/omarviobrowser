@@ -79,39 +79,61 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build Android Release APK
+      - name: Decode Release Keystore (if configured)
+        run: |
+          if [ -n "${{ secrets.OMARVIO_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.OMARVIO_KEYSTORE_BASE64 }}" | base64 -d > /tmp/omarvio-release.jks
+            echo "OMARVIO_KEYSTORE_PATH=/tmp/omarvio-release.jks" >> "$GITHUB_ENV"
+            echo "OMARVIO_KEYSTORE_PASSWORD=${{ secrets.OMARVIO_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "OMARVIO_KEY_ALIAS=${{ secrets.OMARVIO_KEY_ALIAS }}" >> "$GITHUB_ENV"
+            echo "OMARVIO_KEY_PASSWORD=${{ secrets.OMARVIO_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "Release keystore configured cleanly."
+          else
+            echo "OMARVIO_KEYSTORE_BASE64 secret not set; falling back to default signing."
+          fi
+
+      - name: Build Android Release APK & Play Store AAB
         working-directory: android
         run: |
-          gradle assembleRelease --no-daemon --stacktrace \
+          gradle assembleRelease bundleRelease --no-daemon --stacktrace \
             -PversionName="${{ steps.release_meta.outputs.version_name }}" \
             -PversionCode="${{ steps.release_meta.outputs.version_code }}"
 
-      - name: Prepare & Verify Signed APK Binary
+      - name: Prepare & Verify Signed APK and AAB Binaries
         run: |
           APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
+          AAB_PATH="android/app/build/outputs/bundle/release/app-release.aab"
           if [ ! -f "$APK_PATH" ]; then
             echo "Release APK not found at $APK_PATH"
             ls -la android/app/build/outputs/apk/release/ || true
             exit 1
           fi
+          if [ ! -f "$AAB_PATH" ]; then
+            echo "Release AAB not found at $AAB_PATH"
+            ls -la android/app/build/outputs/bundle/release/ || true
+            exit 1
+          fi
           cp "$APK_PATH" omarvio-browser.apk
+          cp "$AAB_PATH" omarvio-browser.aab
           SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           APKSIGNER=$(find "$SDK_DIR/build-tools" -name apksigner -type f | head -n 1)
           if [ -z "$APKSIGNER" ]; then
             echo "apksigner not found in $SDK_DIR/build-tools"
             exit 1
           fi
-          "$APKSIGNER" verify --verbose omarvio-browser.apk
+          "$APKSIGNER" verify --verbose --print-certs omarvio-browser.apk
 
-      - name: Upload APK Artifact
+      - name: Upload APK & AAB Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: omarvio-browser-release-apk-${{ steps.release_meta.outputs.version_name }}
-          path: omarvio-browser.apk
+          name: omarvio-browser-release-${{ steps.release_meta.outputs.version_name }}
+          path: |
+            omarvio-browser.apk
+            omarvio-browser.aab
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish Public GitHub Release APK
+      - name: Publish Public GitHub Release APK & AAB
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_meta.outputs.tag_name }}
@@ -120,12 +142,13 @@ jobs:
           make_latest: true
           body: |
             ### ওমারভিও নেটিভ অ্যান্ড্রয়েড ব্রাউজার (${{ steps.release_meta.outputs.version_name }})
-            - সরাসরি ডাউনলোড ও ফোন ইনস্টলযোগ্য `omarvio-browser.apk`
+            - সরাসরি ডাউনলোড ও ফোন ইনস্টলযোগ্য `omarvio-browser.apk` এবং Play Store `.aab` বান্ডল
             - Android 15 / 16 / 17 সমর্থিত (`targetSdk 35`)
             - জিরো প্রক্সি বাধা: Google, YouTube, Facebook, DuckDuckGo, Bing সহ সব সাইট ১০০% সরাসরি লোড হয়।
-            - নেটিভ অ্যাড ও ট্র্যাকার ব্লকার + স্টেপ-বাই-স্টেপ হার্ডওয়্যার ব্যাক বাটন।
+            - ডাইনামিক ৬-লিস্ট অ্যাড ব্লকার, অফলাইন `.mht` পেজ সেভ, বায়োমেট্রিক/পিন ভল্ট লক ও সরাসরি ইন-অ্যাপ আপডেট।
           files: |
             omarvio-browser.apk
+            omarvio-browser.aab
           draft: false
           prerelease: false
         env:

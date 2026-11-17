@@ -20,6 +20,18 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            val ksPath = System.getenv("OMARVIO_KEYSTORE_PATH")
+            if (!ksPath.isNullOrBlank()) {
+                storeFile = file(ksPath)
+                storePassword = System.getenv("OMARVIO_KEYSTORE_PASSWORD") ?: ""
+                keyAlias = System.getenv("OMARVIO_KEY_ALIAS") ?: ""
+                keyPassword = System.getenv("OMARVIO_KEY_PASSWORD") ?: ""
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -27,7 +39,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            val relConfig = signingConfigs.findByName("release")
+            signingConfig = if (relConfig?.storeFile?.exists() == true) {
+                relConfig
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

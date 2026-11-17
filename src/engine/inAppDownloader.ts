@@ -121,8 +121,10 @@ export const saveWebpageArticleOffline = (
 ): InAppDownloadResult => {
   const cleanTitle = title.trim() || 'Offline_Article';
   const filename = `${cleanTitle.replace(/[^a-zA-Z0-9_\u0980-\u09FF]/g, '_')}.txt`;
+  const trimmedContent = content.trim().slice(0, 120000);
+  const fullDocument = `${cleanTitle}\nউৎস: ${url}\nতারিখ: ${new Date().toLocaleString()}\n\n${trimmedContent}`;
 
-  const blob = new Blob([`${cleanTitle}\nউৎস: ${url}\nতারিখ: ${new Date().toLocaleString()}\n\n${content}`], {
+  const blob = new Blob([fullDocument], {
     type: 'text/plain;charset=utf-8',
   });
   const blobUrl = URL.createObjectURL(blob);
@@ -131,9 +133,11 @@ export const saveWebpageArticleOffline = (
     id: `dl-article-${Date.now()}`,
     title: filename,
     type: 'doc',
-    size: `${(blob.size / 1024).toFixed(1)} KB`,
-    date: 'আজকে (ইন-অ্যাপ)',
+    size: `${Math.max(0.2, blob.size / 1024).toFixed(1)} KB`,
+    date: 'আজকে (অফলাইন)',
     url: blobUrl,
+    sourceUrl: url,
+    content: trimmedContent,
   };
 
   addLocalDownload(newItem);
@@ -141,8 +145,72 @@ export const saveWebpageArticleOffline = (
 
   return {
     success: true,
-    message: `📄 আর্টিকেলটি ওমারভিও অফলাইন হাব-এ সেভ হয়েছে!`,
+    message: `📄 পেজটি অফলাইন রিডিংয়ের জন্য ওমারভিও হাবে সেভ হয়েছে: ${filename}`,
     item: newItem,
     blobUrl,
   };
 };
+
+const extractCleanTextFromHtml = (rawHtml: string, fallbackUrl: string): { title: string; text: string } => {
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(rawHtml, 'text/html');
+    const pageTitle = doc.title?.trim() || fallbackUrl;
+    doc
+      .querySelectorAll(
+        'script, style, noscript, iframe, nav, aside, header, footer, [class*="ad-"], [id*="ad-"], [class*="cookie"], [class*="consent"]'
+      )
+      .forEach((el) => el.remove());
+    const root = doc.querySelector('article, main, [role="main"]') || doc.body;
+    const blocks: string[] = [];
+    root?.querySelectorAll('h1, h2, h3, p, blockquote, li').forEach((node) => {
+      const txt = (node.textContent || '').replace(/\s+/g, ' ').trim();
+      if (txt.length >= 16) blocks.push(txt);
+    });
+    const combined = blocks.length > 0 ? blocks.join('\n\n') : (root?.textContent || '').replace(/\s+/g, ' ').trim();
+    return {
+      title: pageTitle,
+      text: combined || `সংরক্ষিত ওয়েবপেজ: ${fallbackUrl}`,
+    };
+  } catch {
+    return {
+      title: fallbackUrl,
+      text: `সংরক্ষিত ওয়েবপেজ: ${fallbackUrl}`,
+    };
+  }
+};
+
+export const saveActiveWebpageOffline = async (
+  title: string,
+  url: string
+): Promise<InAppDownloadResult> => {
+  if (!url) {
+    return { success: false, message: 'সেভ করার মতো সক্রিয় কোনো ওয়েবপেজ পাওয়া যায়নি' };
+  }
+
+  let resolvedTitle = title || url;
+  let capturedText = '';
+
+  try {
+    const resp = await fetch(`/api/proxy?url=${encodeURIComponent(url)}&tb=1&af=1&lists=easylist,easyprivacy,privacyBadger,peterLowe,malwarePhishing,annoyances`);
+    if (resp.ok) {
+      const ct = resp.headers.get('content-type') || '';
+      if (ct.includes('text/html')) {
+        const html = await resp.text();
+        const extracted = extractCleanTextFromHtml(html, url);
+        resolvedTitle = title || extracted.title;
+        capturedText = extracted.text;
+      } else {
+        capturedText = await resp.text();
+      }
+    }
+  } catch {}
+
+  if (!capturedText) {
+    capturedText = `ওয়েবপেজ অফলাইন স্ন্যাপশট\nশিরোনাম: ${resolvedTitle}\nঠিকানা: ${url}\nসংরক্ষণের সময়: ${new Date().toLocaleString()}`;
+  }
+
+  registerDownloadInAndroid(url, `${resolvedTitle}.txt`, 'doc');
+  return saveWebpageArticleOffline(resolvedTitle, url, capturedText);
+};
+

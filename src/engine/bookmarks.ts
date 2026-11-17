@@ -6,6 +6,8 @@
  * Copyright (c) OMARVIO GLOBAL LTD.
  */
 
+import { emitBrowserEvent } from './eventBus';
+
 export interface SavedBookmark {
   id: string;
   title: string;
@@ -79,6 +81,7 @@ export function saveBookmarks(items: SavedBookmark[]): SavedBookmark[] {
     } catch {}
   }
   notifyBookmarkListeners(sorted);
+  emitBrowserEvent('BOOKMARK_UPDATED', { count: sorted.length });
   return sorted;
 }
 
@@ -98,7 +101,9 @@ export function toggleBookmark(
 
   if (existingIdx !== -1) {
     const updated = current.filter((_, idx) => idx !== existingIdx);
-    return { added: false, bookmarks: saveBookmarks(updated) };
+    const saved = saveBookmarks(updated);
+    emitBrowserEvent('BOOKMARK_UPDATED', { count: saved.length, lastUrl: url, added: false });
+    return { added: false, bookmarks: saved };
   }
 
   let safeTitle = (title || '').trim();
@@ -118,7 +123,9 @@ export function toggleBookmark(
     timestamp: Date.now(),
   };
 
-  return { added: true, bookmarks: saveBookmarks([entry, ...current]) };
+  const saved = saveBookmarks([entry, ...current]);
+  emitBrowserEvent('BOOKMARK_UPDATED', { count: saved.length, lastUrl: url, added: true });
+  return { added: true, bookmarks: saved };
 }
 
 export function deleteBookmarkById(id: string): SavedBookmark[] {

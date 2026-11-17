@@ -143,6 +143,22 @@ export const clearAllBrowsingHistory = (): void => {
 };
 
 /**
+ * Clears browsing history items newer than the cutoff timestamp (or all if cutoff <= 0)
+ */
+export const clearBrowsingHistorySince = (cutoffTimestamp: number): void => {
+  if (cutoffTimestamp <= 0) {
+    clearAllBrowsingHistory();
+    return;
+  }
+  try {
+    const current = getBrowsingHistory();
+    const kept = current.filter((item) => item.timestamp < cutoffTimestamp);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(kept));
+    notifyListeners(kept);
+  } catch {}
+};
+
+/**
  * Subscribes to history updates
  */
 export const subscribeHistory = (listener: HistoryListener): (() => void) => {

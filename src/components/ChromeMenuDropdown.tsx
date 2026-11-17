@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -16,8 +16,6 @@ import {
   History,
   Trash2,
   Sliders,
-  CheckSquare,
-  Square,
   Bookmark,
   Layers,
   Share2,
@@ -30,8 +28,8 @@ import {
   HelpCircle,
   Edit3,
   Zap,
-  MapPin,
 } from 'lucide-react';
+import { useBrowserEvent } from '../engine/eventBus';
 
 interface ChromeMenuDropdownProps {
   isOpen: boolean;
@@ -102,6 +100,39 @@ export const ChromeMenuDropdown: React.FC<ChromeMenuDropdownProps> = ({
   onOpenSettings,
   onOpenHelp,
 }) => {
+  const [liveDesktopMode, setLiveDesktopMode] = useState(isDesktopMode);
+  const [liveReadingMode, setLiveReadingMode] = useState(isReadingMode);
+  const [liveBookmarked, setLiveBookmarked] = useState(isBookmarked);
+
+  useEffect(() => {
+    setLiveDesktopMode(isDesktopMode);
+    setLiveReadingMode(isReadingMode);
+    setLiveBookmarked(isBookmarked);
+  }, [isDesktopMode, isReadingMode, isBookmarked]);
+
+  useBrowserEvent(
+    'DESKTOP_MODE_CHANGED',
+    React.useCallback((payload) => {
+      setLiveDesktopMode(payload.isDesktopMode);
+    }, [])
+  );
+
+  useBrowserEvent(
+    'READING_MODE_CHANGED',
+    React.useCallback((payload) => {
+      setLiveReadingMode(payload.isReadingMode);
+    }, [])
+  );
+
+  useBrowserEvent(
+    'BOOKMARK_UPDATED',
+    React.useCallback((payload) => {
+      if (typeof payload.added === 'boolean') {
+        setLiveBookmarked(payload.added);
+      }
+    }, [])
+  );
+
   if (!isOpen) return null;
 
   const handleAction = (cb: () => void) => {
@@ -157,12 +188,12 @@ export const ChromeMenuDropdown: React.FC<ChromeMenuDropdownProps> = ({
           <button
             type="button"
             onClick={() => handleAction(onToggleBookmark)}
-            title={isBookmarked ? 'Bookmarked' : 'Add bookmark'}
+            title={liveBookmarked ? 'Bookmarked' : 'Add bookmark'}
             className="w-10 h-10 rounded-full flex items-center justify-center text-[#e3e3e3] hover:bg-[#3c4043] active:scale-95 transition-colors"
           >
             <Star
               className={`w-5 h-5 ${
-                isBookmarked ? 'fill-amber-400 text-amber-400' : 'text-[#e3e3e3]'
+                liveBookmarked ? 'fill-amber-400 text-amber-400' : 'text-[#e3e3e3]'
               }`}
             />
           </button>
@@ -336,15 +367,15 @@ export const ChromeMenuDropdown: React.FC<ChromeMenuDropdownProps> = ({
                 <div className="flex items-center gap-3.5">
                   <BookOpen
                     className={`w-5 h-5 shrink-0 ${
-                      isReadingMode ? 'text-cyan-400' : 'text-[#c4c7c5]'
+                      liveReadingMode ? 'text-cyan-400' : 'text-[#c4c7c5]'
                     }`}
                   />
-                  <span className={isReadingMode ? 'text-cyan-300 font-medium' : 'text-[#e3e3e3] font-normal'}>
-                    {isReadingMode ? 'Exit Reading mode' : 'Show Reading mode'}
+                  <span className={liveReadingMode ? 'text-cyan-300 font-medium' : 'text-[#e3e3e3] font-normal'}>
+                    {liveReadingMode ? 'Exit Reading mode' : 'Show Reading mode'}
                   </span>
                 </div>
                 <div className="text-cyan-400">
-                  {isReadingMode ? (
+                  {liveReadingMode ? (
                     <div className="w-5 h-5 rounded bg-cyan-500 border border-cyan-400 flex items-center justify-center text-slate-950 font-bold shadow-sm">
                       <svg className="w-3.5 h-3.5 stroke-current stroke-2 fill-none" viewBox="0 0 24 24">
                         <polyline points="20 6 9 17 4 12" />
@@ -356,14 +387,19 @@ export const ChromeMenuDropdown: React.FC<ChromeMenuDropdownProps> = ({
                 </div>
               </button>
 
-              {/* Install and create shortcut */}
+              {/* Add to Home screen (Chrome / PWA Shortcut Pinning) */}
               <button
                 type="button"
                 onClick={() => handleAction(onInstallShortcut)}
-                className="w-full flex items-center gap-3.5 px-4 py-3 hover:bg-[#35363a] active:bg-[#3c4043] text-left text-sm transition-colors cursor-pointer"
+                className="w-full flex items-center justify-between px-4 py-3 hover:bg-[#35363a] active:bg-[#3c4043] text-left text-sm transition-colors cursor-pointer"
               >
-                <Smartphone className="w-5 h-5 text-[#c4c7c5] shrink-0" />
-                <span className="text-[#e3e3e3] font-normal">Install and create shortcut</span>
+                <div className="flex items-center gap-3.5">
+                  <Smartphone className="w-5 h-5 text-cyan-400 shrink-0" />
+                  <span className="text-[#e3e3e3] font-normal">Add to Home screen</span>
+                </div>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  PWA
+                </span>
               </button>
 
               {/* Set as default browser & WhatsApp link suggestion optimizer */}
@@ -398,7 +434,7 @@ export const ChromeMenuDropdown: React.FC<ChromeMenuDropdownProps> = ({
                 </div>
                 {/* Authentic Square Checkbox matching Chrome Android */}
                 <div className="text-cyan-400">
-                  {isDesktopMode ? (
+                  {liveDesktopMode ? (
                     <div className="w-5 h-5 rounded bg-cyan-500 border border-cyan-400 flex items-center justify-center text-slate-950 font-bold shadow-sm">
                       <svg className="w-3.5 h-3.5 stroke-current stroke-2 fill-none" viewBox="0 0 24 24">
                         <polyline points="20 6 9 17 4 12" />
@@ -417,6 +453,16 @@ export const ChromeMenuDropdown: React.FC<ChromeMenuDropdownProps> = ({
           {/* Home-specific items */}
           {isHomePage && (
             <>
+              {/* Add OMARVIO PWA to Home screen */}
+              <button
+                type="button"
+                onClick={() => handleAction(onInstallShortcut)}
+                className="w-full flex items-center gap-3.5 px-4 py-3 hover:bg-[#35363a] active:bg-[#3c4043] text-left text-sm transition-colors cursor-pointer"
+              >
+                <Smartphone className="w-5 h-5 text-cyan-400 shrink-0" />
+                <span className="text-[#e3e3e3] font-normal">Add to Home screen</span>
+              </button>
+
               {/* Customize new tab page */}
               <button
                 type="button"

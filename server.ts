@@ -134,12 +134,14 @@ async function startServer() {
     const aggressiveTrackerBlocking = req.query.tb !== '0';
     const adsFiltering = req.query.af !== '0';
     const httpsOnlyMode = req.query.ho !== '0';
+    const isDesktopMode = req.query.desktop === '1';
     const allowHttpBypass = req.query.allowHttp === '1';
     const rawListsParam = typeof req.query.lists === 'string' ? req.query.lists : undefined;
     const enabledLists = parseEnabledListsParam(rawListsParam);
     const tbFlag = aggressiveTrackerBlocking ? '1' : '0';
     const afFlag = adsFiltering ? '1' : '0';
     const hoFlag = httpsOnlyMode ? '1' : '0';
+    const desktopFlag = isDesktopMode ? '1' : '0';
     const listsQueryVal = encodeURIComponent(serializeEnabledListsParam(enabledLists));
 
     if (!targetUrl) {
@@ -185,8 +187,22 @@ async function startServer() {
           }
         }
         targetUrl = u.toString();
+      } else if (isDesktopMode) {
+        if (host === 'm.youtube.com' || host === 'youtube.com' || host === 'm.m.youtube.com') {
+          u.hostname = 'www.youtube.com';
+          u.searchParams.delete('persist_app');
+          u.searchParams.set('app', 'desktop');
+          targetUrl = u.toString();
+        } else if (host === 'm.facebook.com' || host === 'mbasic.facebook.com' || host === 'facebook.com' || host === 'm.m.facebook.com' || host === 'www.m.facebook.com') {
+          u.hostname = 'www.facebook.com';
+          targetUrl = u.toString();
+        } else if (host === 'm.wikipedia.org' || host === 'wikipedia.org' || host === 'm.m.wikipedia.org') {
+          u.hostname = 'www.wikipedia.org';
+          targetUrl = u.toString();
+        }
       } else if (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.m.youtube.com') {
         u.hostname = 'm.youtube.com';
+        if (u.searchParams.get('app') === 'desktop') u.searchParams.delete('app');
         targetUrl = u.toString();
       } else if (host === 'facebook.com' || host === 'www.facebook.com' || host === 'm.m.facebook.com' || host === 'www.m.facebook.com') {
         u.hostname = 'm.facebook.com';
@@ -262,8 +278,9 @@ async function startServer() {
       timeout = setTimeout(() => controller.abort(), 14000);
 
       const fetchHeaders: Record<string, string> = {
-        'User-Agent':
-          'Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
+        'User-Agent': isDesktopMode
+          ? 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+          : 'Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
         'Accept':
           'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
@@ -386,16 +403,32 @@ async function startServer() {
           html = `${baseTag}${html}`;
         }
 
+        // 2b. Normalize <meta name="viewport"> to eliminate over-zooming on mobile & support crisp 1280px Desktop mode
+        html = html.replace(/<meta\b[^>]*\bname\s*=\s*["']?viewport["']?[^>]*>/gi, '');
+        const enforcedViewportContent = isDesktopMode
+          ? 'width=1280, initial-scale=1.0, minimum-scale=0.25, maximum-scale=5.0, user-scalable=yes'
+          : 'width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover';
+        const normalizedViewport = `<meta name="viewport" content="${enforcedViewportContent}">`;
+        if (/<head[^>]*>/i.test(html)) {
+          html = html.replace(/<head[^>]*>/i, `$&${normalizedViewport}`);
+        } else {
+          html = `${normalizedViewport}${html}`;
+        }
+
         // 3. Inject anti-frame-busting, popup neutralization, granular ad-block CSS, and video ad skipper
-        const privacyFlagsQuery = `&tb=${tbFlag}&af=${afFlag}&ho=${hoFlag}&lists=${listsQueryVal}`;
+        const privacyFlagsQuery = `&tb=${tbFlag}&af=${afFlag}&ho=${hoFlag}&desktop=${desktopFlag}&lists=${listsQueryVal}`;
         const cosmeticCss = getCosmeticCssForSettings({ adsFiltering, enabledLists });
         const interceptor = `
-          <style>
-            html {
+          <style id="omarvio-viewport-style">
+            html, body {
+              -webkit-text-size-adjust: 100% !important;
+              text-size-adjust: 100% !important;
               -webkit-overflow-scrolling: touch !important;
               touch-action: pan-x pan-y pinch-zoom !important;
               overscroll-behavior-y: contain !important;
+              ${isDesktopMode ? 'min-width: 1280px !important;' : 'width: 100% !important; max-width: 100vw !important; overflow-x: hidden !important;'}
             }
+            ${!isDesktopMode ? 'img, video, iframe, canvas, svg, table { max-width: 100%; }' : ''}
             ${cosmeticCss}
           </style>
           ${adsFiltering && enabledLists.easylist !== false ? `<script>${AD_FAST_SKIP_SCRIPT}</script>` : ''}
@@ -403,6 +436,31 @@ async function startServer() {
             (function() {
               var speculativeUrl = null;
               var privacyFlags = '${privacyFlagsQuery}';
+              var expectedViewport = '${enforcedViewportContent}';
+
+              // 0. Force viewport meta override & lock initial-scale=1.0 against external SPA overrides (YouTube/Facebook)
+              function enforceViewportOverride() {
+                try {
+                  var metas = document.querySelectorAll('meta[name="viewport"], meta[name="VIEWPORT"]');
+                  if (metas.length === 0) {
+                    var head = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
+                    if (head) {
+                      var m = document.createElement('meta');
+                      m.setAttribute('name', 'viewport');
+                      m.setAttribute('content', expectedViewport);
+                      head.insertBefore(m, head.firstChild);
+                    }
+                  } else {
+                    for (var vi = 0; vi < metas.length; vi++) {
+                      if (vi > 0) {
+                        metas[vi].parentNode && metas[vi].parentNode.removeChild(metas[vi]);
+                      } else if (metas[vi].getAttribute('content') !== expectedViewport) {
+                        metas[vi].setAttribute('content', expectedViewport);
+                      }
+                    }
+                  }
+                } catch(e) {}
+              }
 
               // 1. Force all target="_blank", target="_new" to target="_self" immediately and continuously
               function enforceSelfNavigation() {
@@ -418,20 +476,25 @@ async function startServer() {
                 } catch(e) {}
               }
 
+              enforceViewportOverride();
               enforceSelfNavigation();
               if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', enforceSelfNavigation);
+                document.addEventListener('DOMContentLoaded', function() {
+                  enforceViewportOverride();
+                  enforceSelfNavigation();
+                });
               }
 
               try {
                 var observer = new MutationObserver(function() {
+                  enforceViewportOverride();
                   enforceSelfNavigation();
                 });
                 observer.observe(document.documentElement || document.body, {
                   childList: true,
                   subtree: true,
                   attributes: true,
-                  attributeFilter: ['target']
+                  attributeFilter: ['target', 'content', 'name']
                 });
               } catch(e) {}
 
@@ -834,28 +897,28 @@ async function startServer() {
     const localApk = findLocalApkPath();
     const releaseJson = readReleaseManifest();
     const envApkUrl = (process.env.OMARVIO_APK_URL || releaseJson.apkUrl || '').trim();
-    const envRepo = (process.env.OMARVIO_GITHUB_REPO || releaseJson.repo || '')
+    const envRepo = (process.env.OMARVIO_GITHUB_REPO || releaseJson.repo || 'omarvio-live/omarviobrowser')
       .trim()
       .replace(/^https?:\/\/github\.com\//i, '')
       .replace(/\/+$/, '');
     const githubReleaseUrl = envApkUrl || (envRepo ? `https://github.com/${envRepo}/releases/latest/download/omarvio-browser.apk` : '');
 
-    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
     res.json({
       hasLocalBinary: Boolean(localApk),
       directApkUrl: localApk ? '/api/download-apk?direct=1' : githubReleaseUrl || null,
       githubRepo: envRepo || null,
       workflowFile: '.github/workflows/build-apk.yml',
       packageName: 'com.omarvio.browser',
-      version: releaseJson.version || '2.0.0.12',
-      versionCode: releaseJson.versionCode || 12,
+      version: releaseJson.version || '2.0.0.14',
+      versionCode: releaseJson.versionCode || 14,
     });
   });
 
   app.get('/api/download-apk', (req, res) => {
     const localApk = findLocalApkPath();
     const releaseJson = readReleaseManifest();
-    const verLabel = releaseJson.version || '2.0.0.12';
+    const verLabel = releaseJson.version || '2.0.0.14';
     if (localApk) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
       res.setHeader('Content-Disposition', `attachment; filename="omarvio-browser-v${verLabel}.apk"`);
@@ -1024,6 +1087,129 @@ async function startServer() {
   });
 
   // =========================================================================
+  // ROUTE 3C: DYNAMIC ZERO-TRACKER FILTER LISTS AUTO-UPDATER (/api/filter-lists)
+  // =========================================================================
+  app.get('/api/filter-lists', (_req, res) => {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    return res.json({
+      version: '2026.11.16.1',
+      updatedAt: new Date().toISOString(),
+      source: 'OMARVIO Zero-Tracker Filter Registry',
+      lists: {
+        easylist: [
+          'doubleclick.net',
+          'googlesyndication.com',
+          'googleadservices.com',
+          'adnxs.com',
+          'taboola.com',
+          'outbrain.com',
+          'mgid.com',
+          'propellerads.com',
+          'adsterra.com',
+          'popads.net',
+          'popcash.net',
+          'monetag.com',
+          'effectivegatecpm.com',
+          'hilltopads.net',
+          'exoclick.com',
+          'revcontent.com',
+          'teads.tv',
+          'pubmatic.com',
+          'rubiconproject.com',
+          'openx.net',
+          'casalemedia.com',
+          'media.net',
+          'adcash.com',
+          'adpushup.com',
+          'ezoic.net',
+          'mediavine.com',
+          'raptive.com',
+        ],
+        easyprivacy: [
+          'google-analytics.com',
+          'googletagmanager.com',
+          'connect.facebook.net',
+          'hotjar.com',
+          'clarity.ms',
+          'mixpanel.com',
+          'segment.io',
+          'segment.com',
+          'amplitude.com',
+          'chartbeat.com',
+          'omtrdc.net',
+          'scorecardresearch.com',
+          'quantserve.com',
+          'mc.yandex.ru',
+          'appsflyer.com',
+          'adjust.com',
+          'branch.io',
+          'heapanalytics.com',
+          'sentry-cdn.com',
+          'bugsnag.com',
+        ],
+        privacyBadger: [
+          'demdex.net',
+          'krxd.net',
+          'bluekai.com',
+          'exelator.com',
+          'rlcdn.com',
+          'liveramp.com',
+          'tapad.com',
+          'id5-sync.com',
+          'crwdcntrl.net',
+          'pippio.com',
+          'fpjs.io',
+          'fingerprintjs.com',
+          'bounceexchange.com',
+          'criteo.com',
+          'criteo.net',
+        ],
+        peterLowe: [
+          'adservice.google.com',
+          'adroll.com',
+          'adsrvr.org',
+          'advertising.com',
+          'moatads.com',
+          '2mdn.net',
+          'zedo.com',
+          'bidswitch.net',
+          'smartadserver.com',
+          'adform.net',
+          'serving-sys.com',
+          'mathtag.com',
+          'doubleverify.com',
+          'adsafeprotected.com',
+        ],
+        malwarePhishing: [
+          'coinhive.com',
+          'coin-hive.com',
+          'cryptoloot.pro',
+          'jsecoin.com',
+          'minero.cc',
+          'authedmine.com',
+          'webminepool.com',
+          'adsco.re',
+          'malware-traffic.net',
+          'phishing-test.omarvio.invalid',
+        ],
+      },
+    });
+  });
+
+  // Explicit handler for Android Digital Asset Links (avoids dotfile ignore)
+  app.get('/.well-known/assetlinks.json', (_req, res) => {
+    const assetLinksPath = path.join(process.cwd(), 'public', '.well-known', 'assetlinks.json');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    if (fs.existsSync(assetLinksPath)) {
+      return res.sendFile(assetLinksPath);
+    }
+    return res.status(404).json({ error: 'assetlinks.json not found' });
+  });
+
+  // =========================================================================
   // ROUTE 4: SYSTEM HEALTH CHECK
   // =========================================================================
   app.get('/api/health', (_req, res) => {
@@ -1095,7 +1281,7 @@ async function startServer() {
     });
   } else {
     const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, { dotfiles: 'allow' }));
     app.get('*', (_req, res) => {
       res.sendFile(path.resolve(distPath, 'index.html'));
     });

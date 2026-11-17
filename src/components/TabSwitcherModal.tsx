@@ -21,6 +21,7 @@ import {
   Copy,
   Check,
   Layers,
+  Zap,
 } from 'lucide-react';
 
 export interface TabGroupMeta {
@@ -92,6 +93,7 @@ interface TabSwitcherModalProps {
   onCloseGroup?: (groupId: string) => void;
   onNewTabInGroup?: (groupId: string, groupName: string, groupColor?: string) => void;
   onDuplicateTab?: (tabId: string) => void;
+  onSleepTab?: (tabId: string) => void;
 }
 
 export const TabSwitcherModal: React.FC<TabSwitcherModalProps> = ({
@@ -112,9 +114,11 @@ export const TabSwitcherModal: React.FC<TabSwitcherModalProps> = ({
   onCloseGroup,
   onNewTabInGroup,
   onDuplicateTab,
+  onSleepTab,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [showHeaderMenu, setShowHeaderMenu] = useState(false);
+  const [isCompactGrid, setIsCompactGrid] = useState(false);
 
   // Drag-and-drop state
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
@@ -253,7 +257,9 @@ export const TabSwitcherModal: React.FC<TabSwitcherModalProps> = ({
           onSelectTab(tab.id);
           onCloseModal();
         }}
-        className={`relative flex flex-col h-52 sm:h-56 rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all group ${
+        className={`relative flex flex-col ${
+          isCompactGrid ? 'h-40 sm:h-44' : 'h-52 sm:h-56'
+        } rounded-2xl overflow-hidden cursor-pointer active:scale-[0.98] transition-all group ${
           isDropTarget
             ? 'ring-2 ring-cyan-400 scale-[1.02] shadow-2xl shadow-cyan-500/30'
             : isActive
@@ -359,6 +365,13 @@ export const TabSwitcherModal: React.FC<TabSwitcherModalProps> = ({
             </div>
           )}
 
+          {/* Sleeping Badge */}
+          {tab.isSleeping && (
+            <div className="absolute bottom-2 left-2 px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-500/40 text-[9px] font-semibold text-emerald-300 flex items-center gap-1">
+              <span>💤 Sleeping</span>
+            </div>
+          )}
+
           {/* Incognito Badge */}
           {tab.isIncognito && (
             <div className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded bg-black/80 border border-slate-700 text-[9px] text-indigo-300 flex items-center gap-1">
@@ -397,8 +410,11 @@ export const TabSwitcherModal: React.FC<TabSwitcherModalProps> = ({
           </div>
           <button
             type="button"
-            className="p-1 rounded text-[#c4c7c5] hover:text-white transition-colors"
-            title="Tab Grid View"
+            onClick={() => setIsCompactGrid((prev) => !prev)}
+            className={`p-1 rounded transition-colors cursor-pointer ${
+              isCompactGrid ? 'text-cyan-300 bg-cyan-950/60' : 'text-[#c4c7c5] hover:text-white'
+            }`}
+            title={isCompactGrid ? 'Switch to standard grid' : 'Switch to compact grid'}
           >
             <LayoutGrid className="w-4 h-4" />
           </button>
@@ -642,7 +658,11 @@ export const TabSwitcherModal: React.FC<TabSwitcherModalProps> = ({
 
               {/* Group Tabs Grid */}
               {!isCollapsed && (
-                <div className="p-2.5 grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                <div
+                  className={`p-2.5 grid gap-2.5 ${
+                    isCompactGrid ? 'grid-cols-3 sm:grid-cols-4' : 'grid-cols-2 sm:grid-cols-3'
+                  }`}
+                >
                   {group.tabs.map((tab) => renderTabCard(tab))}
                 </div>
               )}
@@ -673,7 +693,11 @@ export const TabSwitcherModal: React.FC<TabSwitcherModalProps> = ({
           )}
 
           {ungroupedTabs.length > 0 ? (
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <div
+              className={`grid gap-3 ${
+                isCompactGrid ? 'grid-cols-3 sm:grid-cols-4' : 'grid-cols-2 sm:grid-cols-3'
+              }`}
+            >
               {ungroupedTabs.map((tab) => renderTabCard(tab))}
             </div>
           ) : (
@@ -761,6 +785,20 @@ export const TabSwitcherModal: React.FC<TabSwitcherModalProps> = ({
                 >
                   <FolderMinus className="w-4 h-4 text-amber-400 shrink-0" />
                   <span>Remove from &ldquo;{contextTab.groupName}&rdquo;</span>
+                </button>
+              )}
+
+              {onSleepTab && contextTab.url && !contextTab.isSleeping && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSleepTab(contextTab.id);
+                    setContextMenuTabId(null);
+                  }}
+                  className="w-full px-4 py-2.5 text-left text-sm text-emerald-300 hover:bg-[#32343a] flex items-center gap-3 cursor-pointer border-t border-[#3c4043]/60"
+                >
+                  <Zap className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>Sleep Tab (Save RAM)</span>
                 </button>
               )}
 

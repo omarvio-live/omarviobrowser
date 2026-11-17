@@ -9,7 +9,15 @@
 
 import React, { useState, useEffect } from 'react';
 import { Download, X, Smartphone, Check, Laptop, Share, Compass } from 'lucide-react';
-import { isAndroidNativeShell, triggerAndroidAppUpdateCheck } from '../engine/nativeBridge';
+import {
+  isAndroidNativeShell,
+  triggerAndroidAppUpdateCheck,
+  fetchLiveApkReleaseStatus,
+  ApkReleaseStatus,
+} from '../engine/nativeBridge';
+import { setGlobalPwaInstallPrompt, emitBrowserEvent } from '../engine/eventBus';
+
+const DISMISSED_VERSION_KEY = 'omarvio_dismissed_update_ver';
 
 export const InstallBanner: React.FC = () => {
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -19,6 +27,7 @@ export const InstallBanner: React.FC = () => {
   const [showGuide, setShowGuide] = useState(false);
   const [deviceType, setDeviceType] = useState<'ios' | 'android' | 'desktop'>('android');
   const [inAndroidApp, setInAndroidApp] = useState(false);
+  const [apkStatus, setApkStatus] = useState<ApkReleaseStatus | null>(null);
 
   useEffect(() => {
     setInAndroidApp(isAndroidNativeShell());
@@ -41,28 +50,55 @@ export const InstallBanner: React.FC = () => {
 
     checkStandalone();
 
+    const loadApkRelease = async () => {
+      const live = await fetchLiveApkReleaseStatus();
+      if (live) {
+        setApkStatus(live);
+        emitBrowserEvent('APK_UPDATE_AVAILABLE', {
+          version: live.version,
+          versionCode: live.versionCode,
+          directApkUrl: live.directApkUrl,
+        });
+        const dismissedVer = localStorage.getItem(DISMISSED_VERSION_KEY);
+        if (dismissedVer && dismissedVer === live.version) {
+          setDismissed(true);
+        } else {
+          // Automatically show banner again when a newer release version drops
+          setDismissed(false);
+        }
+      }
+    };
+    loadApkRelease();
+
     const handleBeforeInstallPrompt = (e: Event) => {
       e.preventDefault();
       setDeferredPrompt(e);
+      setGlobalPwaInstallPrompt(e);
     };
 
     const handleAppInstalled = () => {
       setInstalledSuccess(true);
       setIsStandalone(true);
       setDeferredPrompt(null);
+      setGlobalPwaInstallPrompt(null);
       setTimeout(() => setDismissed(true), 3500);
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
     window.addEventListener('appinstalled', handleAppInstalled);
+    window.addEventListener('focus', loadApkRelease);
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
       window.removeEventListener('appinstalled', handleAppInstalled);
+      window.removeEventListener('focus', loadApkRelease);
     };
   }, []);
 
-  // If already standalone (installed PWA) or dismissed by user, do not render
+  const liveVersion = apkStatus?.version || '2.0.0.14';
+  const directApkUrl = apkStatus?.directApkUrl || '/api/download-apk?direct=1';
+
+  // If already standalone (installed PWA) or dismissed for this exact release, do not render
   if (isStandalone || dismissed) {
     return null;
   }
@@ -97,11 +133,14 @@ export const InstallBanner: React.FC = () => {
             className="w-8 h-8 aspect-square rounded-lg object-contain bg-black shrink-0 shadow-sm"
           />
           <div className="min-w-0">
-            <p className="font-bold text-slate-100 text-xs whitespace-nowrap truncate">
-              OMARVIO BROWSER
+            <p className="font-bold text-slate-100 text-xs whitespace-nowrap truncate flex items-center gap-1.5">
+              <span>OMARVIO BROWSER</span>
+              <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[10px] font-mono">
+                v{liveVersion}
+              </span>
             </p>
             <p className="text-[11px] text-slate-400 truncate hidden sm:block">
-              নেটিভ Android APK অথবা PWA অ্যাপ হিসেবে ব্যবহার করুন
+              নতুন ভার্সন আপডেট রেডি · নেটিভ Android APK অথবা PWA অ্যাপ হিসেবে ব্যবহার করুন
             </p>
           </div>
         </div>
@@ -118,24 +157,24 @@ export const InstallBanner: React.FC = () => {
                   type="button"
                   onClick={() => {
                     if (!triggerAndroidAppUpdateCheck()) {
-                      window.location.href = '/api/download-apk?direct=1';
+                      window.location.href = directApkUrl;
                     }
                   }}
                   className="min-h-[36px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-sm active:scale-95 transition-all cursor-pointer touch-manipulation whitespace-nowrap"
                   title="অ্যাপ আপডেট চেক ও ইনস্টল করুন"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>অ্যাপ আপডেট</span>
+                  <span>আপডেট v{liveVersion}</span>
                 </button>
               ) : (
                 <a
-                  href="/api/download-apk?direct=1"
+                  href={directApkUrl}
                   download="omarvio-browser.apk"
                   className="min-h-[36px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-sm active:scale-95 transition-all cursor-pointer touch-manipulation whitespace-nowrap"
-                  title="সরাসরি নেটিভ অ্যান্ড্রয়েড APK ডাউনলোড করুন"
+                  title="সরাসরি নেটিভ অ্যান্ড্রয়েড APK আপডেট/ডাউনলোড করুন"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>APK ডাউনলোড</span>
+                  <span>APK আপডেট v{liveVersion}</span>
                 </a>
               )}
 
@@ -154,7 +193,10 @@ export const InstallBanner: React.FC = () => {
 
           <button
             type="button"
-            onClick={() => setDismissed(true)}
+            onClick={() => {
+              localStorage.setItem(DISMISSED_VERSION_KEY, liveVersion);
+              setDismissed(true);
+            }}
             className="min-w-[36px] min-h-[36px] flex items-center justify-center text-slate-400 hover:text-slate-200 rounded-lg hover:bg-slate-800 transition-colors cursor-pointer touch-manipulation"
             title="Dismiss"
           >

@@ -2,13 +2,22 @@ package com.omarvio.browser
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
+import android.graphics.drawable.Icon as AndroidIcon
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -72,6 +81,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -79,6 +90,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.Dispatchers
@@ -96,6 +110,7 @@ import java.util.Locale
 private const val CLOUDFLARE_HOME_URL = "https://omarvio-browser.pages.dev/?androidShell=1"
 private const val CLOUDFLARE_SETTINGS_URL = "https://omarvio-browser.pages.dev/?androidShell=1&openSettings=1"
 private const val APK_STATUS_API_URL = "https://omarvio-browser.pages.dev/api/apk-status"
+private const val GITHUB_RAW_RELEASE_URL = "https://raw.githubusercontent.com/omarvio-live/omarviobrowser/main/public/apk-release.json"
 private const val PREFS_NAME = "omarvio_browser_prefs"
 private const val DOWNLOADS_PREFS_KEY = "downloads_json"
 
@@ -103,6 +118,119 @@ private const val MOBILE_USER_AGENT =
     "Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 private const val DESKTOP_USER_AGENT =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+private fun normalizeModeUrl(rawUrl: String, isDesktop: Boolean): String {
+    if (rawUrl.isBlank()) return rawUrl
+    return try {
+        val uri = Uri.parse(rawUrl)
+        val host = (uri.host ?: "").lowercase()
+        val builder = uri.buildUpon()
+        if (isDesktop) {
+            when (host) {
+                "m.youtube.com", "youtube.com", "m.m.youtube.com" -> {
+                    builder.authority("www.youtube.com")
+                    val existing = uri.queryParameterNames.filter { it != "persist_app" && it != "app" }
+                    builder.clearQuery()
+                    existing.forEach { k -> uri.getQueryParameters(k).forEach { v -> builder.appendQueryParameter(k, v) } }
+                    builder.appendQueryParameter("app", "desktop")
+                    builder.build().toString()
+                }
+                "m.facebook.com", "mbasic.facebook.com", "facebook.com", "m.m.facebook.com", "www.m.facebook.com" -> {
+                    builder.authority("www.facebook.com").build().toString()
+                }
+                "m.wikipedia.org", "wikipedia.org", "m.m.wikipedia.org" -> {
+                    builder.authority("www.wikipedia.org").build().toString()
+                }
+                else -> rawUrl
+            }
+        } else {
+            when (host) {
+                "www.youtube.com", "youtube.com", "m.m.youtube.com" -> {
+                    builder.authority("m.youtube.com")
+                    val existing = uri.queryParameterNames.filter { it != "app" || uri.getQueryParameter(it) != "desktop" }
+                    builder.clearQuery()
+                    existing.forEach { k -> uri.getQueryParameters(k).forEach { v -> builder.appendQueryParameter(k, v) } }
+                    builder.build().toString()
+                }
+                "www.facebook.com", "facebook.com", "m.m.facebook.com", "www.m.facebook.com" -> {
+                    builder.authority("m.facebook.com").build().toString()
+                }
+                "www.wikipedia.org", "wikipedia.org", "m.m.wikipedia.org" -> {
+                    builder.authority("m.wikipedia.org").build().toString()
+                }
+                else -> rawUrl
+            }
+        }
+    } catch (_: Exception) {
+        rawUrl
+    }
+}
+
+private fun createWebsiteLauncherBitmap(label: String, url: String): Bitmap {
+    val size = 192
+    val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bmp)
+    val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    val lower = url.lowercase()
+    bgPaint.color = when {
+        lower.contains("youtube.com") || lower.contains("youtu.be") -> AndroidColor.parseColor("#DC2626")
+        lower.contains("facebook.com") -> AndroidColor.parseColor("#1877F2")
+        lower.contains("google.") -> AndroidColor.parseColor("#2563EB")
+        else -> AndroidColor.parseColor("#0F172A")
+    }
+    canvas.drawRoundRect(RectF(6f, 6f, (size - 6).toFloat(), (size - 6).toFloat()), 44f, 44f, bgPaint)
+
+    val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 6f
+        color = AndroidColor.parseColor("#38BDF8")
+    }
+    canvas.drawRoundRect(RectF(8f, 8f, (size - 8).toFloat(), (size - 8).toFloat()), 42f, 42f, ringPaint)
+
+    val letter = label.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "O"
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AndroidColor.WHITE
+        textSize = 92f
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        textAlign = Paint.Align.CENTER
+    }
+    val textY = (size / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f)
+    canvas.drawText(letter, size / 2f, textY, textPaint)
+    return bmp
+}
+
+private fun pinWebsiteToAndroidLauncher(context: Context, rawUrl: String, rawTitle: String): Boolean {
+    return try {
+        val targetUrl = if (rawUrl.isBlank()) "https://omarvio-browser.pages.dev/" else rawUrl.trim()
+        val hostLabel = try {
+            Uri.parse(targetUrl).host?.removePrefix("www.") ?: "Website"
+        } catch (_: Exception) {
+            "Website"
+        }
+        val cleanLabel = rawTitle.ifBlank { hostLabel }.take(24)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val shortcutManager = context.getSystemService(ShortcutManager::class.java)
+            if (shortcutManager != null && shortcutManager.isRequestPinShortcutSupported) {
+                val launchIntent = Intent(context, MainActivity::class.java).apply {
+                    action = Intent.ACTION_VIEW
+                    data = Uri.parse(targetUrl)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+                val iconBmp = createWebsiteLauncherBitmap(cleanLabel, targetUrl)
+                val info = ShortcutInfo.Builder(context, "omarvio_pin_${targetUrl.hashCode()}")
+                    .setShortLabel(cleanLabel)
+                    .setLongLabel(cleanLabel)
+                    .setIcon(AndroidIcon.createWithBitmap(iconBmp))
+                    .setIntent(launchIntent)
+                    .build()
+                return shortcutManager.requestPinShortcut(info, null)
+            }
+        }
+        false
+    } catch (_: Exception) {
+        false
+    }
+}
 
 private data class NativeShortcut(
     val name: String,
@@ -126,7 +254,9 @@ private data class BrowserTabState(
     val title: String = "New Tab",
     val url: String = "",
     val isIncognito: Boolean = false,
-    val isDesktopMode: Boolean = false
+    val isDesktopMode: Boolean = false,
+    val isSleeping: Boolean = false,
+    val savedWebViewState: Bundle? = null
 )
 
 private data class SavedEntry(
@@ -214,11 +344,13 @@ private class OmarvioJsBridge(
     private val onSetAdBlock: (Boolean) -> Unit,
     private val onSetBlockCookies: (Boolean) -> Unit,
     private val onSetHttpsOnly: (Boolean) -> Unit,
+    private val onSetEnergySaver: (Boolean) -> Unit,
     private val onSetPrivacyConfig: (String) -> Unit,
     private val onOpenDownloads: () -> Unit,
     private val onRegisterDownload: (String, String, String) -> Unit,
     private val onCheckAppUpdate: () -> Unit,
-    private val onOpenSettingsModal: () -> Unit
+    private val onOpenSettingsModal: () -> Unit,
+    private val onPinShortcut: (String, String) -> Boolean
 ) {
     @JavascriptInterface
     fun openUrl(url: String) {
@@ -256,6 +388,11 @@ private class OmarvioJsBridge(
     }
 
     @JavascriptInterface
+    fun setEnergySaver(enabled: Boolean) {
+        onSetEnergySaver(enabled)
+    }
+
+    @JavascriptInterface
     fun setPrivacyConfig(jsonConfig: String) {
         if (jsonConfig.isNotBlank()) onSetPrivacyConfig(jsonConfig)
     }
@@ -290,6 +427,9 @@ private class OmarvioJsBridge(
 
     @JavascriptInterface
     fun getBlockedCount(): Int = AdBlockEngine.blockedCount.get()
+
+    @JavascriptInterface
+    fun pinToHomeScreen(url: String, title: String): Boolean = onPinShortcut(url, title)
 }
 
 private fun isNewerVersion(remote: String, local: String): Boolean {
@@ -422,8 +562,45 @@ class MainActivity : ComponentActivity() {
                 },
                 onOpenDownloadRecord = { rec -> openDownloadEntry(rec) },
                 onShareDownloadRecord = { rec -> shareDownloadEntry(rec) },
-                onDeleteDownloadRecord = { rec -> deleteDownloadEntry(rec) }
+                onDeleteDownloadRecord = { rec -> deleteDownloadEntry(rec) },
+                onRequestBiometricUnlock = { onSuccess, onFallbackPin ->
+                    promptBiometricUnlock(onSuccess, onFallbackPin)
+                }
             )
+        }
+    }
+
+    private fun promptBiometricUnlock(onSuccess: () -> Unit, onFallbackPin: () -> Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                val prompt = android.hardware.biometrics.BiometricPrompt.Builder(this)
+                    .setTitle("OMARVIO Privacy Lock")
+                    .setSubtitle("ভল্ট, বুকমার্ক ও ডাউনলোড দেখতে আনলক করুন")
+                    .setNegativeButton(
+                        "PIN ব্যবহার করুন",
+                        ContextCompat.getMainExecutor(this)
+                    ) { _, _ -> onFallbackPin() }
+                    .build()
+                prompt.authenticate(
+                    android.os.CancellationSignal(),
+                    ContextCompat.getMainExecutor(this),
+                    object : android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
+                        override fun onAuthenticationSucceeded(
+                            result: android.hardware.biometrics.BiometricPrompt.AuthenticationResult?
+                        ) {
+                            runOnUiThread { onSuccess() }
+                        }
+
+                        override fun onAuthenticationError(errorCode: Int, errString: CharSequence?) {
+                            runOnUiThread { onFallbackPin() }
+                        }
+                    }
+                )
+            } catch (_: Exception) {
+                onFallbackPin()
+            }
+        } else {
+            onFallbackPin()
         }
     }
 
@@ -702,7 +879,8 @@ fun OmarVioBrowserApp(
     onDownloadFile: (String, String, String?, String?, Boolean) -> Unit,
     onOpenDownloadRecord: (DownloadRecord) -> Unit,
     onShareDownloadRecord: (DownloadRecord) -> Unit,
-    onDeleteDownloadRecord: (DownloadRecord) -> Unit
+    onDeleteDownloadRecord: (DownloadRecord) -> Unit,
+    onRequestBiometricUnlock: (() -> Unit, () -> Unit) -> Unit
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
@@ -787,6 +965,7 @@ fun OmarVioBrowserApp(
     var isJsEnabled by remember { mutableStateOf(prefs.getBoolean("javascript_enabled", true)) }
     var forceDarkWeb by remember { mutableStateOf(prefs.getBoolean("force_dark_web", false)) }
     var saveHistory by remember { mutableStateOf(prefs.getBoolean("save_history_enabled", true)) }
+    var energySaverEnabled by remember { mutableStateOf(prefs.getBoolean("energy_saver_enabled", false)) }
     var textZoomPercent by remember { mutableIntStateOf(prefs.getInt("text_zoom_percent", 100)) }
 
     val blockedCount by AdBlockEngine.blockedCountFlow.collectAsState()
@@ -806,7 +985,8 @@ fun OmarVioBrowserApp(
         AdBlockEngine.saveToPrefs(prefs)
         internalWebView?.let { wv ->
             wv.settings.javaScriptEnabled = isJsEnabled
-            wv.settings.textZoom = textZoomPercent
+            wv.settings.layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
+            wv.settings.textZoom = if (isDesktopMode) minOf(textZoomPercent, 90) else textZoomPercent
             if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
                 WebSettingsCompat.setAlgorithmicDarkeningAllowed(wv.settings, forceDarkWeb)
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -911,13 +1091,136 @@ fun OmarVioBrowserApp(
     var readerTheme by remember { mutableIntStateOf(0) } // 0 = Dark, 1 = Sepia, 2 = Light
     var readerFontSize by remember { mutableIntStateOf(16) }
     var httpsWarningState by remember { mutableStateOf<HttpsOnlyWarningState?>(null) }
+    var allowedHttpHostsList by remember { mutableStateOf(AdBlockEngine.getAllowedHttpHostsList()) }
+    var dynamicFilterStatus by remember { mutableStateOf(AdBlockEngine.dynamicFilterVersion) }
+    var isSyncingFilterLists by remember { mutableStateOf(false) }
+
+    // Biometric & PIN Privacy Vault Lock State
+    var vaultLockEnabled by remember { mutableStateOf(prefs.getBoolean("vault_lock_enabled", false)) }
+    var vaultPinCode by remember { mutableStateOf(prefs.getString("vault_pin_code", "") ?: "") }
+    var isVaultSessionUnlocked by remember { mutableStateOf(false) }
+    var pendingLockedAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var showPinUnlockDialog by remember { mutableStateOf(false) }
+    var showSetPinDialog by remember { mutableStateOf(false) }
+    var pinEntryInput by remember { mutableStateOf("") }
+    var newPinInput by remember { mutableStateOf("") }
 
     // Synced Web Home UI + Auto-Update
     var homeWebView: WebView? by remember { mutableStateOf(null) }
     var homeTargetUrl by remember { mutableStateOf(CLOUDFLARE_HOME_URL) }
     var homeWebFailed by remember { mutableStateOf(false) }
     var availableUpdate by remember { mutableStateOf<AppUpdateInfo?>(null) }
+    var dismissedUpdateVersion by remember { mutableStateOf<String?>(null) }
+    var lastUpdateCheckMs by remember { mutableLongStateOf(0L) }
     var isCheckingUpdate by remember { mutableStateOf(false) }
+
+    fun applyEnergySaverState(enabled: Boolean, syncToWeb: Boolean = true) {
+        energySaverEnabled = enabled
+        prefs.edit().putBoolean("energy_saver_enabled", enabled).apply()
+        if (enabled) {
+            for (i in tabs.indices) {
+                if (i != activeTabIndex && tabs[i].url.isNotBlank() && !tabs[i].isSleeping) {
+                    tabs[i] = tabs[i].copy(isSleeping = true, savedWebViewState = null)
+                }
+            }
+        }
+        internalWebView?.let { wv ->
+            @Suppress("DEPRECATION")
+            wv.settings.setRenderPriority(
+                if (enabled) WebSettings.RenderPriority.LOW else WebSettings.RenderPriority.HIGH
+            )
+        }
+        if (syncToWeb) {
+            homeWebView?.evaluateJavascript(
+                "try{localStorage.setItem('omarvio_energy_saver_v1','$enabled');document.documentElement.classList.toggle('omarvio-energy-saver',$enabled);}catch(e){}",
+                null
+            )
+        }
+    }
+
+    fun sleepTabAt(idx: Int) {
+        if (idx !in tabs.indices) return
+        val t = tabs[idx]
+        if (t.url.isBlank()) return
+        tabs[idx] = t.copy(isSleeping = true, savedWebViewState = null)
+        if (idx == activeTabIndex) {
+            internalWebView?.stopLoading()
+            internalWebView?.loadUrl("about:blank")
+            isHomeVisible = true
+            onHomeVisibilityChanged(true)
+        }
+        Toast.makeText(context, "💤 '${t.title}' স্লিপ করা হয়েছে (RAM ফ্রি)", Toast.LENGTH_SHORT).show()
+    }
+
+    fun sleepAllBackgroundTabs() {
+        var slept = 0
+        for (i in tabs.indices) {
+            if (i != activeTabIndex && tabs[i].url.isNotBlank() && !tabs[i].isSleeping) {
+                tabs[i] = tabs[i].copy(isSleeping = true, savedWebViewState = null)
+                slept++
+            }
+        }
+        Toast.makeText(
+            context,
+            if (slept > 0) "💤 ${slept}টি ব্যাকগ্রাউন্ড ট্যাব স্লিপ করা হয়েছে" else "সব ব্যাকগ্রাউন্ড ট্যাব ইতিমধ্যেই স্লিপ অবস্থায় আছে",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    fun runWithVaultGuard(action: () -> Unit) {
+        if (!vaultLockEnabled || vaultPinCode.isEmpty() || isVaultSessionUnlocked) {
+            action()
+            return
+        }
+        pendingLockedAction = action
+        onRequestBiometricUnlock(
+            {
+                isVaultSessionUnlocked = true
+                pendingLockedAction?.invoke()
+                pendingLockedAction = null
+            },
+            {
+                pinEntryInput = ""
+                showPinUnlockDialog = true
+            }
+        )
+    }
+
+    fun saveCurrentPageOfflineMht() {
+        val wv = internalWebView
+        if (wv == null || isHomeVisible || currentUrl.isBlank()) {
+            Toast.makeText(context, "অফলাইনে সেভ করার জন্য আগে একটি সাইট খুলুন", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+        dir.mkdirs()
+        val safeTitle = pageTitle.replace(Regex("[^a-zA-Z0-9_\\u0980-\\u09FF]+"), "_").trim('_').ifBlank { "omarvio_page" }
+        val targetFile = File(dir, "${safeTitle}_${System.currentTimeMillis()}.mht")
+        wv.saveWebArchive(targetFile.absolutePath, false) { savedPath ->
+            if (!savedPath.isNullOrBlank()) {
+                val existing = loadDownloadRecords(prefs).toMutableList()
+                existing.add(
+                    0,
+                    DownloadRecord(
+                        id = "mht-${System.currentTimeMillis()}",
+                        dmId = -1L,
+                        title = File(savedPath).name,
+                        url = currentUrl,
+                        localPath = savedPath,
+                        mimeType = "multipart/related",
+                        category = "doc",
+                        timestamp = System.currentTimeMillis(),
+                        status = "completed"
+                    )
+                )
+                saveDownloadRecords(prefs, existing)
+                refreshDownloadsList()
+                Toast.makeText(context, "📄 সম্পূর্ণ পেজ অফলাইন (.mht) হিসেবে সেভ হয়েছে!", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(context, "পেজটি অফলাইন আর্কাইভ হিসেবে সেভ করা যায়নি", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     // Fullscreen HTML5 video state
     var fullscreenView by remember { mutableStateOf<View?>(null) }
@@ -985,7 +1288,8 @@ fun OmarVioBrowserApp(
         val currentIdx = activeTabIndex.coerceIn(0, tabs.lastIndex)
         val cur = tabs[currentIdx]
         val finalIncognito = incognitoOverride ?: cur.isIncognito
-        tabs[currentIdx] = cur.copy(url = target, title = target, isIncognito = finalIncognito)
+        target = normalizeModeUrl(target, cur.isDesktopMode)
+        tabs[currentIdx] = cur.copy(url = target, title = target, isIncognito = finalIncognito, isSleeping = false)
 
         isHomeVisible = false
         onHomeVisibilityChanged(false)
@@ -994,6 +1298,10 @@ fun OmarVioBrowserApp(
         homeSearchText = ""
         showReaderModal = false
         internalWebView?.let { wv ->
+            wv.settings.layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
+            wv.settings.userAgentString = if (cur.isDesktopMode) DESKTOP_USER_AGENT else MOBILE_USER_AGENT
+            wv.settings.textZoom = if (cur.isDesktopMode) minOf(textZoomPercent, 90) else textZoomPercent
+            wv.setInitialScale(0)
             if (doNotTrackEnabled) {
                 wv.loadUrl(target, mapOf("DNT" to "1", "Sec-GPC" to "1"))
             } else {
@@ -1055,10 +1363,21 @@ fun OmarVioBrowserApp(
         }
     }
 
+    fun saveOutgoingTabState() {
+        val currentIdx = activeTabIndex.coerceIn(0, tabs.lastIndex)
+        val cur = tabs[currentIdx]
+        val wv = internalWebView
+        if (wv != null && !isHomeVisible && cur.url.isNotBlank()) {
+            val stateBundle = Bundle()
+            wv.saveState(stateBundle)
+            tabs[currentIdx] = cur.copy(savedWebViewState = stateBundle)
+        }
+    }
+
     fun goToHome(homeUrl: String = CLOUDFLARE_HOME_URL) {
         homeTargetUrl = homeUrl
         val currentIdx = activeTabIndex.coerceIn(0, tabs.lastIndex)
-        tabs[currentIdx] = tabs[currentIdx].copy(url = "", title = "New Tab")
+        tabs[currentIdx] = tabs[currentIdx].copy(url = "", title = "New Tab", savedWebViewState = null)
         isHomeVisible = true
         onHomeVisibilityChanged(true)
         inputUrl = ""
@@ -1067,6 +1386,7 @@ fun OmarVioBrowserApp(
     }
 
     fun createNewTab(incognito: Boolean = false) {
+        saveOutgoingTabState()
         val newTab = BrowserTabState(
             id = "tab-${System.currentTimeMillis()}",
             title = if (incognito) "Incognito Tab" else "New Tab",
@@ -1076,13 +1396,21 @@ fun OmarVioBrowserApp(
         )
         tabs.add(newTab)
         activeTabIndex = tabs.lastIndex
-        goToHome()
+        isHomeVisible = true
+        onHomeVisibilityChanged(true)
+        inputUrl = ""
+        currentUrl = ""
+        showFindBar = false
     }
 
     fun switchToTab(idx: Int) {
         if (idx !in tabs.indices) return
+        if (idx != activeTabIndex) {
+            saveOutgoingTabState()
+        }
         activeTabIndex = idx
-        val target = tabs[idx]
+        val target = tabs[idx].copy(isSleeping = false)
+        tabs[idx] = target
         isDesktopMode = target.isDesktopMode
         if (target.url.isBlank()) {
             isHomeVisible = true
@@ -1094,9 +1422,19 @@ fun OmarVioBrowserApp(
             onHomeVisibilityChanged(false)
             currentUrl = target.url
             inputUrl = target.url
-            internalWebView?.settings?.userAgentString =
-                if (target.isDesktopMode) DESKTOP_USER_AGENT else MOBILE_USER_AGENT
-            internalWebView?.loadUrl(target.url)
+            internalWebView?.let { wv ->
+                wv.settings.userAgentString =
+                    if (target.isDesktopMode) DESKTOP_USER_AGENT else MOBILE_USER_AGENT
+                wv.settings.layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
+                wv.settings.textZoom = if (target.isDesktopMode) minOf(textZoomPercent, 90) else textZoomPercent
+                if (target.savedWebViewState != null) {
+                    wv.restoreState(target.savedWebViewState)
+                    canGoBack = WebBackNavigationManager.canNavigateBack(wv)
+                    canGoForward = WebBackNavigationManager.canNavigateForward(wv)
+                } else {
+                    wv.loadUrl(normalizeModeUrl(target.url, target.isDesktopMode))
+                }
+            }
         }
     }
 
@@ -1116,13 +1454,77 @@ fun OmarVioBrowserApp(
         val next = forceState ?: !isDesktopMode
         isDesktopMode = next
         val currentIdx = activeTabIndex.coerceIn(0, tabs.lastIndex)
-        tabs[currentIdx] = tabs[currentIdx].copy(isDesktopMode = next)
+        val active = tabs[currentIdx]
+        val switchedUrl = if (active.url.isNotBlank()) normalizeModeUrl(active.url, next) else ""
+        tabs[currentIdx] = active.copy(
+            isDesktopMode = next,
+            url = if (switchedUrl.isNotBlank()) switchedUrl else active.url
+        )
         internalWebView?.let { wv ->
             wv.settings.userAgentString = if (next) DESKTOP_USER_AGENT else MOBILE_USER_AGENT
             wv.settings.useWideViewPort = true
             wv.settings.loadWithOverviewMode = true
-            if (!isHomeVisible) wv.reload()
+            wv.settings.layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
+            wv.settings.textZoom = if (next) minOf(textZoomPercent, 90) else textZoomPercent
+            wv.setInitialScale(0)
+            if (!isHomeVisible) {
+                val targetToLoad = switchedUrl.ifBlank { currentUrl }
+                if (targetToLoad.isNotBlank() && targetToLoad != currentUrl) {
+                    currentUrl = targetToLoad
+                    inputUrl = targetToLoad
+                    wv.loadUrl(targetToLoad)
+                } else {
+                    wv.reload()
+                }
+            }
         }
+        Toast.makeText(
+            context,
+            if (next) "🖥️ ডেস্কটপ সাইট চালু হয়েছে (1280px)" else "📱 মোবাইল ভিউ চালু হয়েছে",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    fun addCurrentSiteToHomeAndLauncher(customUrl: String = currentUrl, customTitle: String = pageTitle): Boolean {
+        val targetUrl = customUrl.trim().ifBlank { "https://omarvio-browser.pages.dev/" }
+        val hostLabel = try {
+            Uri.parse(targetUrl).host?.removePrefix("www.") ?: "Website"
+        } catch (_: Exception) {
+            "Website"
+        }
+        val cleanTitle = customTitle.trim().ifBlank { hostLabel }.take(24)
+
+        val jsAddShortcut = """
+            try {
+                var raw = localStorage.getItem('omarvio_shortcuts_v5');
+                var arr = raw ? JSON.parse(raw) : [];
+                if (!Array.isArray(arr)) arr = [];
+                var exists = arr.some(function(x){ return x && x.url === ${JSONObject.quote(targetUrl)}; });
+                if (!exists) {
+                    arr.push({
+                        id: 'shortcut-' + Date.now(),
+                        name: ${JSONObject.quote(cleanTitle.take(18))},
+                        url: ${JSONObject.quote(targetUrl)},
+                        colorBg: 'bg-cyan-600',
+                        textColor: 'text-white',
+                        letter: ${JSONObject.quote(cleanTitle.firstOrNull()?.uppercaseChar()?.toString() ?: "W")}
+                    });
+                    localStorage.setItem('omarvio_shortcuts_v5', JSON.stringify(arr));
+                    localStorage.setItem('omarvio_custom_shortcuts', JSON.stringify(arr));
+                    window.dispatchEvent(new Event('omarvio-shortcuts-updated'));
+                }
+            } catch(e) {}
+        """.trimIndent()
+        homeWebView?.evaluateJavascript(jsAddShortcut, null)
+
+        val pinned = pinWebsiteToAndroidLauncher(context, targetUrl, cleanTitle)
+        Toast.makeText(
+            context,
+            if (pinned) "📲 \"$cleanTitle\" ফোনের হোম স্ক্রিন ও ওমারভিও হোমে পিন হচ্ছে!"
+            else "📲 \"$cleanTitle\" ওমারভিও হোম শর্টকাটে যুক্ত হয়েছে!",
+            Toast.LENGTH_SHORT
+        ).show()
+        return pinned
     }
 
     fun clearAllBrowserData() {
@@ -1156,33 +1558,46 @@ fun OmarVioBrowserApp(
     fun checkRemoteUpdate(manualTrigger: Boolean) {
         if (isCheckingUpdate) return
         isCheckingUpdate = true
+        lastUpdateCheckMs = System.currentTimeMillis()
         coroutineScope.launch {
             val foundUpdate = withContext(Dispatchers.IO) {
-                try {
-                    val conn = (URL("$APK_STATUS_API_URL?t=${System.currentTimeMillis()}").openConnection() as HttpURLConnection).apply {
-                        connectTimeout = 5000
-                        readTimeout = 5000
-                        requestMethod = "GET"
-                        useCaches = false
-                        setRequestProperty("Cache-Control", "no-cache")
+                val candidateEndpoints = listOf(
+                    "$APK_STATUS_API_URL?t=${System.currentTimeMillis()}",
+                    "$GITHUB_RAW_RELEASE_URL?t=${System.currentTimeMillis()}"
+                )
+                var result: AppUpdateInfo? = null
+                for (endpoint in candidateEndpoints) {
+                    try {
+                        val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                            connectTimeout = 5000
+                            readTimeout = 5000
+                            requestMethod = "GET"
+                            useCaches = false
+                            setRequestProperty("Cache-Control", "no-cache")
+                        }
+                        if (conn.responseCode == 200) {
+                            val body = conn.inputStream.bufferedReader().use { it.readText() }
+                            val json = JSONObject(body)
+                            val remoteVer = json.optString("version", "").trim()
+                            val remoteCode = json.optInt("versionCode", 0)
+                            val apkUrl = json.optString("directApkUrl", json.optString("apkUrl", "")).trim()
+                            val hasNewer = (remoteCode > installedVersionCode) || isNewerVersion(remoteVer, installedVersion)
+                            if (remoteVer.isNotEmpty() && apkUrl.isNotEmpty() && hasNewer) {
+                                result = AppUpdateInfo(remoteVer, remoteCode, apkUrl)
+                                break
+                            }
+                        }
+                    } catch (_: Exception) {
+                        // Try next fallback endpoint
                     }
-                    if (conn.responseCode == 200) {
-                        val body = conn.inputStream.bufferedReader().use { it.readText() }
-                        val json = JSONObject(body)
-                        val remoteVer = json.optString("version", "").trim()
-                        val remoteCode = json.optInt("versionCode", 0)
-                        val apkUrl = json.optString("directApkUrl", "").trim()
-                        val hasNewer = (remoteCode > installedVersionCode) || isNewerVersion(remoteVer, installedVersion)
-                        if (remoteVer.isNotEmpty() && apkUrl.isNotEmpty() && hasNewer) {
-                            AppUpdateInfo(remoteVer, remoteCode, apkUrl)
-                        } else null
-                    } else null
-                } catch (_: Exception) {
-                    null
                 }
+                result
             }
             isCheckingUpdate = false
             if (foundUpdate != null) {
+                if (foundUpdate.version != availableUpdate?.version) {
+                    dismissedUpdateVersion = null
+                }
                 availableUpdate = foundUpdate
                 if (manualTrigger) {
                     Toast.makeText(
@@ -1203,9 +1618,30 @@ fun OmarVioBrowserApp(
 
     LaunchedEffect(Unit) {
         AdBlockEngine.loadFromPrefs(prefs)
+        allowedHttpHostsList = AdBlockEngine.getAllowedHttpHostsList()
+        dynamicFilterStatus = AdBlockEngine.dynamicFilterVersion
         onRegisterReturnHome { goToHome() }
         onRegisterDownloadsChanged { refreshDownloadsList() }
         checkRemoteUpdate(manualTrigger = false)
+        coroutineScope.launch {
+            val (ok, status) = AdBlockEngine.refreshDynamicFilterLists(prefs)
+            if (ok) dynamicFilterStatus = status
+        }
+    }
+
+    DisposableEffect(context) {
+        val owner = context as? LifecycleOwner
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                if (System.currentTimeMillis() - lastUpdateCheckMs > 20_000L) {
+                    checkRemoteUpdate(manualTrigger = false)
+                }
+            }
+        }
+        owner?.lifecycle?.addObserver(observer)
+        onDispose {
+            owner?.lifecycle?.removeObserver(observer)
+        }
     }
 
     LaunchedEffect(isHomeVisible) {
@@ -1219,8 +1655,13 @@ fun OmarVioBrowserApp(
         }
     }
 
-    BackHandler(enabled = httpsWarningState != null || showDownloadsModal || showChromeMenu || showEngineModal || showTabsModal || showBookmarksModal || showHistoryModal || showFindBar || showNativeSettingsModal || showReaderModal || !isHomeVisible || fullscreenView != null) {
+    BackHandler(enabled = showPinUnlockDialog || showSetPinDialog || httpsWarningState != null || showDownloadsModal || showChromeMenu || showEngineModal || showTabsModal || showBookmarksModal || showHistoryModal || showFindBar || showNativeSettingsModal || showReaderModal || !isHomeVisible || fullscreenView != null) {
         when {
+            showPinUnlockDialog -> {
+                showPinUnlockDialog = false
+                pendingLockedAction = null
+            }
+            showSetPinDialog -> showSetPinDialog = false
             fullscreenView != null -> {
                 fullscreenCallback?.onCustomViewHidden()
                 fullscreenView = null
@@ -1372,6 +1813,48 @@ fun OmarVioBrowserApp(
                             }
                         }
 
+                        // Persistent Top App Update Pill whenever a newer release exists (always visible even after banner dismiss)
+                        availableUpdate?.let { updateChip ->
+                            Row(
+                                modifier = Modifier
+                                    .height(32.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color(0xFF059669))
+                                    .border(1.dp, Color(0xFF34D399).copy(alpha = 0.7f), RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        if (updateChip.isDownloading) {
+                                            refreshDownloadsList()
+                                            showDownloadsModal = true
+                                        } else {
+                                            onDownloadFile(
+                                                updateChip.downloadUrl,
+                                                MOBILE_USER_AGENT,
+                                                "attachment; filename=\"omarvio-browser-v${updateChip.version}.apk\"",
+                                                "application/vnd.android.package-archive",
+                                                true
+                                            )
+                                            availableUpdate = updateChip.copy(isDownloading = true)
+                                        }
+                                    }
+                                    .padding(horizontal = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SystemUpdate,
+                                    contentDescription = "Update Available",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = if (updateChip.isDownloading) "ডাউন" else "আপডেট",
+                                    color = Color.White,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
                         // AdBlock & Privacy Shield Counter Badge (Brave/Chrome style)
                         Row(
                             modifier = Modifier
@@ -1439,7 +1922,7 @@ fun OmarVioBrowserApp(
             }
 
             // Dismissible In-App Auto-Update Banner whenever remote reports a newer APK
-            AnimatedVisibility(visible = availableUpdate != null) {
+            AnimatedVisibility(visible = availableUpdate != null && dismissedUpdateVersion != availableUpdate?.version) {
                 availableUpdate?.let { update ->
                     Row(
                         modifier = Modifier
@@ -1504,7 +1987,7 @@ fun OmarVioBrowserApp(
                                     .padding(horizontal = 12.dp, vertical = 6.dp)
                             )
                             IconButton(
-                                onClick = { availableUpdate = null },
+                                onClick = { dismissedUpdateVersion = update.version },
                                 modifier = Modifier.size(28.dp)
                             ) {
                                 Icon(
@@ -1610,12 +2093,14 @@ fun OmarVioBrowserApp(
                                 loadsImagesAutomatically = true
                                 useWideViewPort = true
                                 loadWithOverviewMode = true
+                                layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
                                 setSupportZoom(true)
                                 builtInZoomControls = true
                                 displayZoomControls = false
                                 cacheMode = WebSettings.LOAD_DEFAULT
                                 userAgentString = MOBILE_USER_AGENT
                             }
+                            setInitialScale(0)
 
                             val browserWebView = this
                             CookieManager.getInstance().apply {
@@ -1678,7 +2163,8 @@ fun OmarVioBrowserApp(
                                 },
                                 onHttpsOnlyWarning = { httpUrl, httpsUrl, reason ->
                                     httpsWarningState = HttpsOnlyWarningState(httpUrl, httpsUrl, reason)
-                                }
+                                },
+                                isDesktopModeProvider = { isDesktopMode }
                             )
 
                             setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
@@ -1761,6 +2247,11 @@ fun OmarVioBrowserApp(
                                                         prefs.edit().putBoolean("https_only_enabled", enabled).apply()
                                                     }
                                                 },
+                                                onSetEnergySaver = { enabled ->
+                                                    post {
+                                                        applyEnergySaverState(enabled, syncToWeb = false)
+                                                    }
+                                                },
                                                 onSetPrivacyConfig = { jsonStr ->
                                                     post {
                                                         AdBlockEngine.applyJsonConfig(jsonStr, prefs)
@@ -1806,6 +2297,9 @@ fun OmarVioBrowserApp(
                                                 },
                                                 onOpenSettingsModal = {
                                                     post { showNativeSettingsModal = true }
+                                                },
+                                                onPinShortcut = { pUrl, pTitle ->
+                                                    pinWebsiteToAndroidLauncher(ctx, pUrl, pTitle)
                                                 }
                                             ),
                                             "OmarvioAndroid"
@@ -2088,8 +2582,10 @@ fun OmarVioBrowserApp(
                         }
                         IconButton(onClick = {
                             showChromeMenu = false
-                            refreshDownloadsList()
-                            showDownloadsModal = true
+                            runWithVaultGuard {
+                                refreshDownloadsList()
+                                showDownloadsModal = true
+                            }
                         }) {
                             Icon(Icons.Default.Download, contentDescription = "Downloads", tint = Color(0xFFE3E3E3))
                         }
@@ -2116,7 +2612,7 @@ fun OmarVioBrowserApp(
 
                     ChromeMenuRow(Icons.Default.History, "History") {
                         showChromeMenu = false
-                        showHistoryModal = true
+                        runWithVaultGuard { showHistoryModal = true }
                     }
                     ChromeMenuRow(Icons.Default.Delete, "Delete browsing data") {
                         showChromeMenu = false
@@ -2124,12 +2620,14 @@ fun OmarVioBrowserApp(
                     }
                     ChromeMenuRow(Icons.Default.Download, "Downloads (${downloadsRecords.size})") {
                         showChromeMenu = false
-                        refreshDownloadsList()
-                        showDownloadsModal = true
+                        runWithVaultGuard {
+                            refreshDownloadsList()
+                            showDownloadsModal = true
+                        }
                     }
                     ChromeMenuRow(Icons.Default.Bookmark, "Bookmarks") {
                         showChromeMenu = false
-                        showBookmarksModal = true
+                        runWithVaultGuard { showBookmarksModal = true }
                     }
                     ChromeMenuRow(Icons.Default.Layers, "Tabs (${tabs.size})") {
                         showChromeMenu = false
@@ -2150,6 +2648,19 @@ fun OmarVioBrowserApp(
                             showChromeMenu = false
                             if (showReaderModal) showReaderModal = false else openReadingMode()
                         }
+                        ChromeMenuRow(Icons.Default.AddToHomeScreen, "Add to Home screen (PWA)") {
+                            showChromeMenu = false
+                            addCurrentSiteToHomeAndLauncher()
+                        }
+                        ChromeMenuRow(Icons.Default.SaveAlt, "Save page offline (.mht)") {
+                            showChromeMenu = false
+                            saveCurrentPageOfflineMht()
+                        }
+                    } else {
+                        ChromeMenuRow(Icons.Default.AddToHomeScreen, "Add OMARVIO to Home screen") {
+                            showChromeMenu = false
+                            addCurrentSiteToHomeAndLauncher("https://omarvio-browser.pages.dev/", "OMARVIO BROWSER")
+                        }
                     }
                     ChromeMenuRow(Icons.Default.FindInPage, "Find in page") {
                         showChromeMenu = false
@@ -2167,7 +2678,7 @@ fun OmarVioBrowserApp(
                         label = if (adBlockEnabled) "Privacy Shields ($blockedCount blocked)" else "Privacy Shields (Paused)"
                     ) {
                         showChromeMenu = false
-                        showNativeSettingsModal = true
+                        runWithVaultGuard { showNativeSettingsModal = true }
                     }
 
                     HorizontalDivider(color = Color(0xFF3C4043))
@@ -2178,7 +2689,7 @@ fun OmarVioBrowserApp(
                     }
                     ChromeMenuRow(Icons.Default.Settings, "Browser Settings (Chrome / Shields)") {
                         showChromeMenu = false
-                        showNativeSettingsModal = true
+                        runWithVaultGuard { showNativeSettingsModal = true }
                     }
                     ChromeMenuRow(Icons.Default.Tune, "Customize Home (Web UI)") {
                         showChromeMenu = false
@@ -2332,7 +2843,17 @@ fun OmarVioBrowserApp(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     if (tab.url.isNotBlank()) {
-                                        Text(tab.url, color = Color(0xFF9AA0A6), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(
+                                            text = when {
+                                                tab.isSleeping -> "💤 স্লিপিং · ${tab.url}"
+                                                tab.savedWebViewState != null -> "${tab.url} · স্টেট সংরক্ষিত"
+                                                else -> tab.url
+                                            },
+                                            color = if (tab.isSleeping) Color(0xFF34D399) else Color(0xFF9AA0A6),
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                     }
                                 }
                                 IconButton(onClick = { closeTabAt(idx) }, modifier = Modifier.size(30.dp)) {
@@ -2419,6 +2940,139 @@ fun OmarVioBrowserApp(
                             .padding(horizontal = 14.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        Text("ENERGY SAVER & MEMORY DASHBOARD", color = Color(0xFF34D399), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.BatteryChargingFull,
+                            title = "Energy Saver Mode",
+                            subtitle = "স্লিপিং ট্যাবের ব্যাকগ্রাউন্ড প্রসেস সীমিত করে ও রেন্ডারিং থ্রটল করে",
+                            checked = energySaverEnabled,
+                            onCheckedChange = { applyEnergySaverState(it) }
+                        )
+
+                        // Live Android Process Memory + High-Energy Tabs Dashboard Card
+                        val actMgr = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                        val memInfo = ActivityManager.MemoryInfo().also { actMgr.getMemoryInfo(it) }
+                        val rt = Runtime.getRuntime()
+                        val appHeapUsedMb = ((rt.totalMemory() - rt.freeMemory()) / (1024L * 1024L)).toInt()
+                        val availDeviceMb = (memInfo.availMem / (1024L * 1024L)).toInt()
+                        val totalDeviceMb = (memInfo.totalMem / (1024L * 1024L)).coerceAtLeast(1L).toInt()
+                        val sleepingTabsCount = tabs.count { it.url.isNotBlank() && it.isSleeping }
+                        val activeLoadedCount = tabs.count { it.url.isNotBlank() && !it.isSleeping }
+
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF202227))
+                                .border(1.dp, Color(0xFF10B981).copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("রিয়েল-টাইম RAM ও হিপ মেমোরি", color = Color(0xFFE2E8F0), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    "${appHeapUsedMb}MB Heap · ${availDeviceMb}/${totalDeviceMb}MB Free",
+                                    color = Color(0xFF34D399),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Text(
+                                "সক্রিয় ট্যাব: $activeLoadedCount · 💤 স্লিপিং ট্যাব: $sleepingTabsCount",
+                                color = Color(0xFF9AA0A6),
+                                fontSize = 11.sp
+                            )
+
+                            val hasBackgroundActive = tabs.indices.any { idx ->
+                                idx != activeTabIndex && tabs[idx].url.isNotBlank() && !tabs[idx].isSleeping
+                            }
+                            if (hasBackgroundActive) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color(0xFF064E3B))
+                                        .clickable { sleepAllBackgroundTabs() }
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("সব ব্যাকগ্রাউন্ড ট্যাব স্লিপ করুন", color = Color(0xFFA7F3D0), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            val loadedTabIndices = tabs.indices.filter { tabs[it].url.isNotBlank() }
+                            if (loadedTabIndices.isNotEmpty()) {
+                                loadedTabIndices.forEach { tIdx ->
+                                    val tItem = tabs[tIdx]
+                                    val hostLower = tItem.url.lowercase()
+                                    val estMb = when {
+                                        tItem.isSleeping -> 0
+                                        hostLower.contains("youtube") || hostLower.contains("facebook") || hostLower.contains("instagram") -> 115
+                                        tIdx == activeTabIndex -> 72
+                                        else -> 58
+                                    }
+                                    val isHigh = !tItem.isSleeping && (estMb >= 70 || tIdx == activeTabIndex)
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(Color(0xFF18191C))
+                                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
+                                            Text(
+                                                text = if (isHigh) "⚡ ${tItem.title}" else if (tItem.isSleeping) "💤 ${tItem.title}" else tItem.title,
+                                                color = Color.White,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = if (tItem.isSleeping) "০ MB · স্লিপিং মোড" else "~${estMb} MB · ${if (isHigh) "High-Energy" else "Active"}",
+                                                color = if (isHigh) Color(0xFFFBBF24) else Color(0xFF34D399),
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            if (!tItem.isSleeping) {
+                                                Text(
+                                                    "স্লিপ",
+                                                    color = Color(0xFF34D399),
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(6.dp))
+                                                        .background(Color(0xFF064E3B))
+                                                        .clickable { sleepTabAt(tIdx) }
+                                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                )
+                                            }
+                                            Text(
+                                                "বন্ধ",
+                                                color = Color(0xFFFB7185),
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(Color(0xFF3B1219))
+                                                    .clickable { closeTabAt(tIdx) }
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalDivider(color = Color(0xFF2D2F34))
                         Text("PRIVACY & AD-BLOCK SHIELDS", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
 
                         NativeSettingToggleRow(
@@ -2544,6 +3198,165 @@ fun OmarVioBrowserApp(
                                 prefs.edit().putBoolean("save_history_enabled", it).apply()
                             }
                         )
+
+                        // Dynamic Filter List Auto-Updater Row
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF0C2338))
+                                .border(1.dp, Color(0xFF38BDF8).copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+                                .clickable {
+                                    if (!isSyncingFilterLists) {
+                                        isSyncingFilterLists = true
+                                        coroutineScope.launch {
+                                            val (ok, status) = AdBlockEngine.refreshDynamicFilterLists(prefs)
+                                            dynamicFilterStatus = status
+                                            isSyncingFilterLists = false
+                                            Toast.makeText(
+                                                context,
+                                                if (ok) "🔄 ফিল্টার লিস্ট আপডেট হয়েছে: $status" else "⚠️ ফিল্টার লিস্ট সিঙ্ক ব্যর্থ",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    }
+                                }
+                                .padding(horizontal = 12.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.Sync, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text("Dynamic Filter Lists Auto-Sync", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        text = if (isSyncingFilterLists) "আপডেট হচ্ছে..." else "বর্তমান: $dynamicFilterStatus",
+                                        color = Color(0xFFBAE6FD),
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                            Text("আপডেট", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        // Biometric & PIN Privacy Vault Lock Toggle
+                        NativeSettingToggleRow(
+                            icon = Icons.Default.Fingerprint,
+                            title = "Biometric & PIN Privacy Lock",
+                            subtitle = if (vaultLockEnabled && vaultPinCode.isNotEmpty()) {
+                                "সক্রিয়: বুকমার্ক, হিস্ট্রি, ডাউনলোড ও সেটিংস লক করা আছে"
+                            } else {
+                                "ফিঙ্গারপ্রিন্ট ও ৪-সংখ্যার পিন দিয়ে প্রাইভেট ডেটা সুরক্ষিত রাখুন"
+                            },
+                            checked = vaultLockEnabled,
+                            onCheckedChange = { enable ->
+                                if (enable) {
+                                    if (vaultPinCode.isEmpty()) {
+                                        newPinInput = ""
+                                        showSetPinDialog = true
+                                    } else {
+                                        vaultLockEnabled = true
+                                        prefs.edit().putBoolean("vault_lock_enabled", true).apply()
+                                    }
+                                } else {
+                                    vaultLockEnabled = false
+                                    prefs.edit().putBoolean("vault_lock_enabled", false).apply()
+                                }
+                            }
+                        )
+
+                        if (vaultLockEnabled) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF24262B))
+                                    .clickable {
+                                        newPinInput = ""
+                                        showSetPinDialog = true
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Change Vault Backup PIN", color = Color(0xFFE2E8F0), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                Text("পরিবর্তন", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        // HTTPS-Only Exceptions Manager UI
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF24262B))
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "HTTPS-Only Exceptions (${allowedHttpHostsList.size})",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (allowedHttpHostsList.isNotEmpty()) {
+                                    Text(
+                                        "Clear All",
+                                        color = Color(0xFFFB7185),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.clickable {
+                                            AdBlockEngine.clearAllAllowedHttpHosts(prefs)
+                                            allowedHttpHostsList = emptyList()
+                                        }
+                                    )
+                                }
+                            }
+                            if (allowedHttpHostsList.isEmpty()) {
+                                Text(
+                                    "কোনো HTTP সাইটে ব্যতিক্রম অনুমতি দেওয়া নেই",
+                                    color = Color(0xFF9AA0A6),
+                                    fontSize = 11.sp
+                                )
+                            } else {
+                                allowedHttpHostsList.forEach { hostItem ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(Color(0xFF18191C))
+                                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = hostItem,
+                                            color = Color(0xFFFCD34D),
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "Revoke",
+                                            color = Color(0xFFFB7185),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.clickable {
+                                                AdBlockEngine.revokeHttpHost(hostItem, prefs)
+                                                allowedHttpHostsList = AdBlockEngine.getAllowedHttpHostsList()
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
 
                         HorizontalDivider(color = Color(0xFF2D2F34))
                         Text("SEARCH & SITE SETTINGS", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -2926,7 +3739,8 @@ fun OmarVioBrowserApp(
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedButton(
                         onClick = {
-                            AdBlockEngine.allowHttpHostOnce(warn.httpUrl)
+                            AdBlockEngine.allowHttpHostOnce(warn.httpUrl, prefs)
+                            allowedHttpHostsList = AdBlockEngine.getAllowedHttpHostsList()
                             val targetHttp = warn.httpUrl
                             httpsWarningState = null
                             navigateToUrl(targetHttp)
@@ -2934,6 +3748,109 @@ fun OmarVioBrowserApp(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("তবুও HTTP সাইটে যান (Continue Anyway)", color = Color(0xFFFDA4AF), fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // BIOMETRIC FALLBACK PIN UNLOCK & SETUP DIALOGS
+        // =========================================================================
+        if (showPinUnlockDialog) {
+            Dialog(onDismissRequest = {
+                showPinUnlockDialog = false
+                pendingLockedAction = null
+            }) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(Color(0xFF18191C))
+                        .border(1.dp, Color(0xFF38BDF8).copy(alpha = 0.5f), RoundedCornerShape(22.dp))
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("OMARVIO Vault PIN", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("লক করা অংশ খুলতে আপনার গোপন PIN লিখুন", color = Color(0xFF9AA0A6), fontSize = 12.sp)
+                    OutlinedTextField(
+                        value = pinEntryInput,
+                        onValueChange = { if (it.length <= 8) pinEntryInput = it },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        placeholder = { Text("৪+ সংখ্যার PIN") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = {
+                            showPinUnlockDialog = false
+                            pendingLockedAction = null
+                        }) {
+                            Text("বাতিল", color = Color(0xFF9AA0A6))
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(onClick = {
+                            if (pinEntryInput == vaultPinCode) {
+                                isVaultSessionUnlocked = true
+                                showPinUnlockDialog = false
+                                pinEntryInput = ""
+                                pendingLockedAction?.invoke()
+                                pendingLockedAction = null
+                            } else {
+                                Toast.makeText(context, "ভুল PIN দিয়েছেন!", Toast.LENGTH_SHORT).show()
+                            }
+                        }) {
+                            Text("আনলক")
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showSetPinDialog) {
+            Dialog(onDismissRequest = { showSetPinDialog = false }) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(Color(0xFF18191C))
+                        .border(1.dp, Color(0xFF34D399).copy(alpha = 0.5f), RoundedCornerShape(22.dp))
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("নতুন Vault PIN সেট করুন", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("বায়োমেট্রিক না থাকলে বা বিকল্প হিসেবে এই ৪-৮ সংখ্যার PIN ব্যবহার হবে।", color = Color(0xFF9AA0A6), fontSize = 12.sp)
+                    OutlinedTextField(
+                        value = newPinInput,
+                        onValueChange = { if (it.length <= 8) newPinInput = it },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        placeholder = { Text("কমপক্ষে ৪ সংখ্যার PIN") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = { showSetPinDialog = false }) {
+                            Text("বাতিল", color = Color(0xFF9AA0A6))
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(onClick = {
+                            if (newPinInput.trim().length >= 4) {
+                                vaultPinCode = newPinInput.trim()
+                                vaultLockEnabled = true
+                                isVaultSessionUnlocked = true
+                                prefs.edit()
+                                    .putString("vault_pin_code", vaultPinCode)
+                                    .putBoolean("vault_lock_enabled", true)
+                                    .apply()
+                                showSetPinDialog = false
+                                Toast.makeText(context, "🔐 বায়োমেট্রিক ও PIN লক সক্রিয় হয়েছে", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "কমপক্ষে ৪টি সংখ্যা দিন", Toast.LENGTH_SHORT).show()
+                            }
+                        }) {
+                            Text("সেভ করুন")
+                        }
                     }
                 }
             }

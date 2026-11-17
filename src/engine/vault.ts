@@ -209,3 +209,58 @@ export const restoreEncryptedVaultBackup = async (
     };
   }
 };
+
+const VAULT_PIN_STORAGE_KEY = 'omarvio_vault_pin_hash';
+
+const hashPinSha256 = async (pin: string): Promise<string> => {
+  const salted = `omarvio-vault-pin-v1:${pin.trim()}`;
+  try {
+    const bytes = new TextEncoder().encode(salted);
+    const digest = await window.crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  } catch {
+    return btoa(salted);
+  }
+};
+
+export const hasVaultPin = (): boolean => {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return false;
+  try {
+    return Boolean(localStorage.getItem(VAULT_PIN_STORAGE_KEY));
+  } catch {
+    return false;
+  }
+};
+
+export const setVaultPin = async (pin: string): Promise<boolean> => {
+  const clean = pin.trim();
+  if (clean.length < 4) return false;
+  const hash = await hashPinSha256(clean);
+  try {
+    localStorage.setItem(VAULT_PIN_STORAGE_KEY, hash);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const verifyVaultPin = async (pin: string): Promise<boolean> => {
+  if (!hasVaultPin()) return true;
+  try {
+    const stored = localStorage.getItem(VAULT_PIN_STORAGE_KEY);
+    if (!stored) return true;
+    const candidate = await hashPinSha256(pin);
+    return candidate === stored;
+  } catch {
+    return false;
+  }
+};
+
+export const clearVaultPin = (): void => {
+  try {
+    localStorage.removeItem(VAULT_PIN_STORAGE_KEY);
+  } catch {}
+};
+

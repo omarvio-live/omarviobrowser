@@ -49,6 +49,7 @@ interface BrowserFrameProps {
   onToggleReadingMode?: (next?: boolean) => void;
   onToast?: (msg: string) => void;
   onShare?: (title: string, url: string) => void;
+  onWakeTab?: () => void;
 }
 
 export function normalizeUrlKey(raw: string): string {
@@ -78,6 +79,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
   onToggleReadingMode,
   onToast,
   onShare,
+  onWakeTab,
 }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -242,31 +244,54 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
         return `https://www.youtube-nocookie.com/embed/${ytId}?autoplay=1&enablejsapi=1&rel=0&modestbranding=1`;
       }
 
-      // Safely optimize major platforms to mobile web variants using exact hostname checks
+      // Route YouTube/Facebook/Wikipedia based on active Mobile vs Desktop mode
       try {
         const u = new URL(cleanTarget);
         const host = u.hostname.toLowerCase();
-        if (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.m.youtube.com') {
-          u.hostname = 'm.youtube.com';
-          cleanTarget = u.toString();
-        } else if (host === 'facebook.com' || host === 'www.facebook.com' || host === 'm.m.facebook.com' || host === 'www.m.facebook.com') {
-          u.hostname = 'm.facebook.com';
-          cleanTarget = u.toString();
-        } else if (host === 'wikipedia.org' || host === 'www.wikipedia.org' || host === 'm.m.wikipedia.org') {
-          u.hostname = 'm.wikipedia.org';
-          cleanTarget = u.toString();
+        if (isDesktopMode) {
+          if (host === 'm.youtube.com' || host === 'youtube.com' || host === 'm.m.youtube.com') {
+            u.hostname = 'www.youtube.com';
+            u.searchParams.delete('persist_app');
+            u.searchParams.set('app', 'desktop');
+            cleanTarget = u.toString();
+          } else if (
+            host === 'm.facebook.com' ||
+            host === 'mbasic.facebook.com' ||
+            host === 'facebook.com' ||
+            host === 'm.m.facebook.com' ||
+            host === 'www.m.facebook.com'
+          ) {
+            u.hostname = 'www.facebook.com';
+            cleanTarget = u.toString();
+          } else if (host === 'm.wikipedia.org' || host === 'wikipedia.org' || host === 'm.m.wikipedia.org') {
+            u.hostname = 'www.wikipedia.org';
+            cleanTarget = u.toString();
+          }
+        } else {
+          if (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.m.youtube.com') {
+            u.hostname = 'm.youtube.com';
+            if (u.searchParams.get('app') === 'desktop') u.searchParams.delete('app');
+            cleanTarget = u.toString();
+          } else if (host === 'facebook.com' || host === 'www.facebook.com' || host === 'm.m.facebook.com' || host === 'www.m.facebook.com') {
+            u.hostname = 'm.facebook.com';
+            cleanTarget = u.toString();
+          } else if (host === 'wikipedia.org' || host === 'www.wikipedia.org' || host === 'm.m.wikipedia.org') {
+            u.hostname = 'm.wikipedia.org';
+            cleanTarget = u.toString();
+          }
         }
       } catch {}
 
       const tbFlag = privacySettings.aggressiveTrackerBlocking ? '1' : '0';
       const afFlag = privacySettings.adsFiltering ? '1' : '0';
       const hoFlag = privacySettings.httpsOnlyMode && !allowInsecureHttp && !isHttpAllowedForHost(cleanTarget) ? '1' : '0';
+      const desktopFlag = isDesktopMode ? '1' : '0';
       const listsParam = encodeURIComponent(serializeEnabledListsParam(privacySettings.enabledLists));
       const allowHttpParam = allowInsecureHttp || isHttpAllowedForHost(cleanTarget) ? '&allowHttp=1' : '';
       const bypassParam = forceBypass ? `&_reval=${Date.now()}` : '';
-      return `/api/proxy?url=${encodeURIComponent(cleanTarget)}&tb=${tbFlag}&af=${afFlag}&ho=${hoFlag}&lists=${listsParam}${allowHttpParam}${bypassParam}`;
+      return `/api/proxy?url=${encodeURIComponent(cleanTarget)}&tb=${tbFlag}&af=${afFlag}&ho=${hoFlag}&desktop=${desktopFlag}&lists=${listsParam}${allowHttpParam}${bypassParam}`;
     },
-    [privacySettings]
+    [privacySettings, isDesktopMode]
   );
 
   // Compute initial src directly to eliminate frame-0 delay
@@ -360,14 +385,14 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
     return cleanup;
   }, [onUrlChange, onToast, privacySettings]);
 
-  // 3. Desktop mode scaling
+  // 3. Desktop mode 1280px crisp viewport scaling & frame ResizeObserver (zero unintended zoom)
   useEffect(() => {
     const updateScale = () => {
       if (isDesktopMode && containerRef.current) {
-        const containerWidth = containerRef.current.clientWidth;
-        const targetWidth = 1024;
-        if (containerWidth < targetWidth) {
-          setScale(containerWidth / targetWidth);
+        const containerWidth = containerRef.current.clientWidth || window.innerWidth;
+        const targetWidth = 1280;
+        if (containerWidth > 0 && containerWidth < targetWidth) {
+          setScale(Math.max(0.25, containerWidth / targetWidth));
         } else {
           setScale(1);
         }
@@ -377,8 +402,16 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
     };
 
     updateScale();
+    let resizeObs: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
+      resizeObs = new ResizeObserver(updateScale);
+      resizeObs.observe(containerRef.current);
+    }
     window.addEventListener('resize', updateScale);
-    return () => window.removeEventListener('resize', updateScale);
+    return () => {
+      window.removeEventListener('resize', updateScale);
+      resizeObs?.disconnect();
+    };
   }, [isDesktopMode]);
 
   // 3b. Request persistent local storage (without saturating mobile bandwidth with background site scraping)
@@ -668,12 +701,35 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
             setHasError(true);
             return;
           }
-          // Detect blank body after proxy load when no handshake arrived
+          // Enforce viewport meta override with initial-scale=1.0 on same-origin proxy documents
           try {
             const doc = iframeRef.current.contentDocument;
-            if (isProxyFrame && doc && doc.body && doc.body.children.length === 0 && !doc.body.innerText?.trim()) {
-              setHasError(true);
-              return;
+            if (isProxyFrame && doc) {
+              if (doc.body && doc.body.children.length === 0 && !doc.body.innerText?.trim()) {
+                setHasError(true);
+                return;
+              }
+              const expectedContent = isDesktopMode
+                ? 'width=1280, initial-scale=1.0, minimum-scale=0.25, maximum-scale=5.0, user-scalable=yes'
+                : 'width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover';
+              const existingMetas = doc.querySelectorAll('meta[name="viewport"], meta[name="VIEWPORT"]');
+              if (existingMetas.length === 0) {
+                const head = doc.head || doc.documentElement;
+                if (head) {
+                  const meta = doc.createElement('meta');
+                  meta.setAttribute('name', 'viewport');
+                  meta.setAttribute('content', expectedContent);
+                  head.insertBefore(meta, head.firstChild);
+                }
+              } else {
+                existingMetas.forEach((m, index) => {
+                  if (index > 0) {
+                    m.remove();
+                  } else if (m.getAttribute('content') !== expectedContent) {
+                    m.setAttribute('content', expectedContent);
+                  }
+                });
+              }
             }
           } catch {}
 
@@ -763,6 +819,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
           <button
             type="button"
             onClick={() => {
+              onWakeTab?.();
               if (onToast) onToast('⚡ ট্যাব মেমোরি রিস্টোর করা হচ্ছে...');
               setIsOptimisticNavigating(true);
               onLoadStartRef.current?.();
@@ -972,7 +1029,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
               }`}
             >
               <div
-                className="flex-1 w-full h-full relative bg-[#070913] touch-pan-y overscroll-contain"
+                className="flex-1 w-full h-full relative overflow-hidden bg-[#070913] touch-pan-y overscroll-contain"
                 style={{
                   touchAction: 'pan-x pan-y pinch-zoom',
                   WebkitOverflowScrolling: 'touch',
@@ -990,7 +1047,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
                   style={
                     isDesktopMode && scale < 1
                       ? {
-                          width: '1024px',
+                          width: '1280px',
                           height: `${100 / scale}%`,
                           transform: `scale(${scale})`,
                           transformOrigin: 'top left',

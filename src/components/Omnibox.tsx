@@ -15,8 +15,13 @@ import {
   Mic,
   MicOff,
 } from 'lucide-react';
-import { getSanitizedSearchUrl } from '../engine/adblocker';
+import {
+  getSanitizedSearchUrl,
+  getPrivacyFilterSettings,
+  getAdblockStats,
+} from '../engine/adblocker';
 import { getLanguage } from '../engine/i18n';
+import { useBrowserEvent } from '../engine/eventBus';
 
 interface OmniboxProps {
   currentUrl: string;
@@ -24,6 +29,7 @@ interface OmniboxProps {
   onNavigate: (targetUrl: string) => void;
   onOpenLens?: () => void;
   onOpenSearchOverlay?: () => void;
+  onOpenSiteControls?: () => void;
 }
 
 const SPEECH_LOCALE_MAP: Record<string, string> = {
@@ -40,15 +46,42 @@ export const Omnibox: React.FC<OmniboxProps> = ({
   onNavigate,
   onOpenLens,
   onOpenSearchOverlay,
+  onOpenSiteControls,
 }) => {
   const [inputValue, setInputValue] = useState(currentUrl);
   const [isFocused, setIsFocused] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [isListening, setIsListening] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
+  const [httpsOnlyActive, setHttpsOnlyActive] = useState<boolean>(
+    () => getPrivacyFilterSettings().httpsOnlyMode
+  );
+  const [shieldActive, setShieldActive] = useState<boolean>(() => {
+    const s = getPrivacyFilterSettings();
+    return s.aggressiveTrackerBlocking || s.adsFiltering;
+  });
+  const [blockedTotal, setBlockedTotal] = useState<number>(() => {
+    const st = getAdblockStats();
+    return st.trackersBlocked + st.adsDestroyed;
+  });
   const inputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
   const statusTimerRef = useRef<number | null>(null);
+
+  useBrowserEvent(
+    'PRIVACY_SETTINGS_UPDATED',
+    React.useCallback((settings) => {
+      setHttpsOnlyActive(settings.httpsOnlyMode);
+      setShieldActive(settings.aggressiveTrackerBlocking || settings.adsFiltering);
+    }, [])
+  );
+
+  useBrowserEvent(
+    'BLOCKED_STAT_UPDATED',
+    React.useCallback((st) => {
+      setBlockedTotal(st.trackersBlocked + st.adsDestroyed);
+    }, [])
+  );
 
   useEffect(() => {
     if (!isFocused && !isListening) {
@@ -247,16 +280,40 @@ export const Omnibox: React.FC<OmniboxProps> = ({
             : 'bg-slate-900/80 hover:bg-slate-900 border-slate-700/60 hover:border-slate-600'
         }`}
       >
-        {/* Security Indicator */}
-        <div
-          title="256-Bit Military Privacy Shield Active"
-          className="flex items-center gap-1 pl-0.5 text-cyan-400 select-none cursor-default shrink-0"
+        {/* Security Indicator (Interactive Site Controls with Real-Time Event Bus State) */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onOpenSiteControls?.();
+          }}
+          title={
+            shieldActive
+              ? `Site security & shields active (${blockedTotal} blocked · ${httpsOnlyActive ? 'HTTPS-Only' : 'Standard'})`
+              : 'Site security controls (Shields paused)'
+          }
+          className={`flex items-center gap-1 pl-1 pr-1.5 py-0.5 rounded-full transition-colors cursor-pointer shrink-0 ${
+            currentUrl.startsWith('http://')
+              ? 'text-amber-400 hover:bg-amber-950/50'
+              : shieldActive
+              ? 'text-cyan-400 hover:bg-cyan-950/50'
+              : 'text-slate-400 hover:bg-slate-800'
+          }`}
         >
-          <Lock className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-cyan-400 shrink-0" />
-          <span className="hidden md:inline-block text-[10px] font-semibold text-cyan-300 tracking-wider">
-            SECURE
+          <Lock
+            className={`w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0 ${
+              currentUrl.startsWith('http://')
+                ? 'text-amber-400'
+                : shieldActive
+                ? 'text-emerald-400'
+                : 'text-slate-400'
+            }`}
+          />
+          <span className="hidden md:inline-block text-[10px] font-semibold tracking-wider">
+            {currentUrl.startsWith('http://') ? 'HTTP' : httpsOnlyActive ? 'HTTPS' : 'SECURE'}
           </span>
-        </div>
+        </button>
 
         {/* Omnibox Input */}
         <div

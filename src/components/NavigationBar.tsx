@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -13,6 +13,8 @@ import {
   MoreVertical,
   Plus,
 } from 'lucide-react';
+import { useBrowserEvent } from '../engine/eventBus';
+import { getEnergySaverEnabled } from '../engine/energySaver';
 
 interface NavigationBarProps {
   canGoBack: boolean;
@@ -43,6 +45,27 @@ export const NavigationBar: React.FC<NavigationBarProps> = ({
   onOpenMenu,
   onNewTab,
 }) => {
+  const [liveTabCount, setLiveTabCount] = useState(tabCount);
+  const [energySaverActive, setEnergySaverActive] = useState(getEnergySaverEnabled);
+
+  useEffect(() => {
+    setLiveTabCount(tabCount);
+  }, [tabCount]);
+
+  useBrowserEvent(
+    'TABS_UPDATED',
+    React.useCallback((payload) => {
+      setLiveTabCount(payload.count);
+    }, [])
+  );
+
+  useBrowserEvent(
+    'ENERGY_SAVER_CHANGED',
+    React.useCallback((payload) => {
+      setEnergySaverActive(payload.enabled);
+    }, [])
+  );
+
   return (
     <div className="w-full bg-slate-950/95 border-t border-slate-800/80 px-2 sm:px-3 py-1.5 flex items-center justify-between safe-bottom backdrop-blur-md z-40 touch-manipulation">
       {/* Left Navigation Buttons */}
@@ -113,10 +136,17 @@ export const NavigationBar: React.FC<NavigationBarProps> = ({
         <button
           type="button"
           onClick={onOpenTabs}
-          title="Tabs Overview"
-          className="relative px-2.5 py-1 rounded-lg border border-slate-700 bg-slate-900 text-cyan-400 hover:text-cyan-200 hover:border-cyan-400/60 font-mono font-bold text-xs transition-colors flex items-center justify-center min-w-[32px] h-8 active:scale-95 cursor-pointer touch-manipulation"
+          title={energySaverActive ? 'Tabs Overview (Energy Saver Active)' : 'Tabs Overview'}
+          className={`relative px-2.5 py-1 rounded-lg border bg-slate-900 font-mono font-bold text-xs transition-colors flex items-center justify-center min-w-[32px] h-8 active:scale-95 cursor-pointer touch-manipulation ${
+            energySaverActive
+              ? 'border-emerald-500/60 text-emerald-300'
+              : 'border-slate-700 text-cyan-400 hover:text-cyan-200 hover:border-cyan-400/60'
+          }`}
         >
-          {tabCount}
+          {liveTabCount}
+          {energySaverActive && (
+            <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-emerald-400" />
+          )}
         </button>
 
         {/* New Tab Quick Button */}

@@ -22,7 +22,11 @@ export interface SleepingTabState {
  * - >= 6GB: 4 tabs
  * Safe default: 3
  */
-export function getMaxAliveTabs(): number {
+export function getMaxAliveTabs(energySaverActive = false): number {
+  if (energySaverActive) {
+    // Strictly keep only the foreground active tab mounted; put all background tabs to sleep
+    return 1;
+  }
   if (typeof navigator !== 'undefined' && 'deviceMemory' in navigator) {
     const mem = (navigator as any).deviceMemory || 4;
     if (mem <= 2) return 2;
@@ -35,23 +39,28 @@ export function getMaxAliveTabs(): number {
 /**
  * Computes updated LRU list of alive tab IDs.
  * The active tab is moved to the head.
- * Inactive tabs beyond maxAliveTabs are put to sleep (unmounted from DOM).
+ * Inactive tabs beyond maxAliveTabs (or explicitly sleeping tabs) are put to sleep.
  */
 export function computeAliveTabIds(
   prevAlive: string[],
   activeTabId: string,
   existingTabIds: string[],
-  maxAlive: number = getMaxAliveTabs()
+  maxAlive: number = getMaxAliveTabs(),
+  explicitlySleepingIds: Set<string> = new Set()
 ): string[] {
-  // Filter out any closed tabs
-  const validPrev = prevAlive.filter((id) => existingTabIds.includes(id));
-  
-  // Place active tab at head
+  // Filter out any closed or manually sleeping tabs
+  const validPrev = prevAlive.filter(
+    (id) => existingTabIds.includes(id) && !explicitlySleepingIds.has(id)
+  );
+
+  // Place active tab at head unless explicitly put to sleep
   const withoutActive = validPrev.filter((id) => id !== activeTabId);
-  const reordered = [activeTabId, ...withoutActive];
+  const reordered = explicitlySleepingIds.has(activeTabId)
+    ? withoutActive
+    : [activeTabId, ...withoutActive];
 
   // Return at most maxAlive
-  return reordered.slice(0, maxAlive);
+  return reordered.slice(0, Math.max(1, maxAlive));
 }
 
 // In-memory registry for sleeping tab restore data
@@ -76,4 +85,12 @@ export function wakeSleepingTab(id: string): SleepingTabState | undefined {
 
 export function clearSleepingTab(id: string) {
   sleepingTabStore.delete(id);
+}
+
+export function isTabSleepingInStore(id: string): boolean {
+  return sleepingTabStore.has(id);
+}
+
+export function getSleepingTabCount(): number {
+  return sleepingTabStore.size;
 }

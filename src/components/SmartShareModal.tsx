@@ -61,15 +61,62 @@ export const SmartShareModal: React.FC<SmartShareModalProps> = ({
   const [quoteAuthor, setQuoteAuthor] = useState('OMARVIO BROWSER');
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Milestone 15: Peer-to-Peer Zero-Server WebRTC Beam State
-  const [p2pBeamCode, setP2pBeamCode] = useState(() => `OMV-${Math.floor(100000 + Math.random() * 900000)}`);
+  // Milestone 15: Peer-to-Peer Zero-Server BroadcastChannel + Storage Beam State
+  const [p2pBeamCode] = useState(() => {
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+      const arr = new Uint32Array(1);
+      crypto.getRandomValues(arr);
+      return `OMV-${100000 + (arr[0] % 900000)}`;
+    }
+    return 'OMV-482910';
+  });
   const [p2pStatus, setP2pStatus] = useState<'idle' | 'beaming' | 'connected' | 'received'>('idle');
   const [receiveCodeInput, setReceiveCodeInput] = useState('');
   const [receivedBeamItem, setReceivedBeamItem] = useState<{ title: string; url: string } | null>(null);
+  const beamRegistryRef = useRef<Record<string, { title: string; url: string; ts: number }>>({});
 
   // Clean target url of spy trackers before sharing
   const cleanUrl = currentUrl ? cleanTrackingParameters(currentUrl) : 'https://omarvio.com';
   const effectiveTitle = pageTitle || 'OMARVIO Protected Page';
+
+  useEffect(() => {
+    if (!isOpen || typeof window === 'undefined') return;
+    const STORAGE_KEY = 'omarvio_p2p_beam_registry_v1';
+    try {
+      const existing = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      if (existing && typeof existing === 'object') {
+        beamRegistryRef.current = existing;
+      }
+    } catch {
+      // Ignore malformed storage
+    }
+
+    let channel: BroadcastChannel | null = null;
+    if ('BroadcastChannel' in window) {
+      channel = new BroadcastChannel('omarvio_p2p_beam');
+      channel.onmessage = (event) => {
+        const data = event.data;
+        if (data?.type === 'BEAM_OFFER' && data.code && data.url) {
+          beamRegistryRef.current[data.code] = {
+            title: data.title || 'Beamed Page',
+            url: data.url,
+            ts: Date.now(),
+          };
+          if (data.code === receiveCodeInput.trim().toUpperCase()) {
+            setReceivedBeamItem({ title: data.title || 'Beamed Page', url: data.url });
+            setP2pStatus('received');
+          }
+        } else if (data?.type === 'BEAM_ACK' && data.code === p2pBeamCode) {
+          setP2pStatus('connected');
+          onToast('✅ অন্য ট্যাব/উইন্ডো বিম রিসিভ করেছে!');
+        }
+      };
+    }
+
+    return () => {
+      channel?.close();
+    };
+  }, [isOpen, p2pBeamCode, receiveCodeInput, onToast]);
 
   // Generate QR Code dynamically when URL or color changes
   useEffect(() => {
@@ -99,7 +146,7 @@ export const SmartShareModal: React.FC<SmartShareModalProps> = ({
       .catch((err: unknown) => {
         console.error('QR code generation error:', err);
       });
-  }, [isOpen, cleanUrl, qrColor, qrBg, activeTab, activeMedia, quoteSnippet]);
+  }, [isOpen, cleanUrl, qrColor, qrBg, activeTab, activeMedia, quoteSnippet, p2pBeamCode, effectiveTitle]);
 
   if (!isOpen) return null;
 
@@ -123,12 +170,22 @@ export const SmartShareModal: React.FC<SmartShareModalProps> = ({
     }
   };
 
+  const openExternalShareLink = (shareUrl: string) => {
+    const a = document.createElement('a');
+    a.href = shareUrl;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
   // WhatsApp 1-tap share
   const handleWhatsAppShare = () => {
     const text = encodeURIComponent(
       `🔗 ${effectiveTitle}\n${cleanUrl}\n\n🛡️ ওমারভিও ব্রাউজার: "আমার ফোন, আমার ডেটা – কেন দেব অন্যের হাতে!"`
     );
-    window.open(`https://api.whatsapp.com/send?text=${text}`, '_blank');
+    openExternalShareLink(`https://api.whatsapp.com/send?text=${text}`);
   };
 
   // Telegram 1-tap share
@@ -136,18 +193,18 @@ export const SmartShareModal: React.FC<SmartShareModalProps> = ({
     const text = encodeURIComponent(
       `🔗 ${effectiveTitle}\n🛡️ ওমারভিও প্রাইভেট ব্রাউজার দিয়ে বিজ্ঞাপন ও ট্র্যাকার ছাড়া ওপেন করুন:`
     );
-    window.open(`https://t.me/share/url?url=${encodeURIComponent(cleanUrl)}&text=${text}`, '_blank');
+    openExternalShareLink(`https://t.me/share/url?url=${encodeURIComponent(cleanUrl)}&text=${text}`);
   };
 
   // Twitter / X share
   const handleTwitterShare = () => {
     const text = encodeURIComponent(`🔗 ${effectiveTitle} via #OmarvioBrowser`);
-    window.open(`https://twitter.com/intent/tweet?text=${text}&url=${encodeURIComponent(cleanUrl)}`, '_blank');
+    openExternalShareLink(`https://twitter.com/intent/tweet?text=${text}&url=${encodeURIComponent(cleanUrl)}`);
   };
 
   // Facebook share
   const handleFacebookShare = () => {
-    window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(cleanUrl)}`, '_blank');
+    openExternalShareLink(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(cleanUrl)}`);
   };
 
   // Copy Clean URL to clipboard
@@ -692,11 +749,31 @@ export const SmartShareModal: React.FC<SmartShareModalProps> = ({
                   type="button"
                   onClick={() => {
                     setP2pStatus('beaming');
-                    onToast('📡 লোকাল WebRTC বিম ব্রডকাস্ট শুরু হয়েছে...');
-                    setTimeout(() => {
-                      setP2pStatus('connected');
-                      onToast('✅ ডিভাইস সংযুক্ত হয়েছে! পেজ ডেটা সফলভাবে স্থানান্তরিত!');
-                    }, 1200);
+                    const payload = {
+                      type: 'BEAM_OFFER',
+                      code: p2pBeamCode,
+                      title: effectiveTitle,
+                      url: cleanUrl,
+                      ts: Date.now(),
+                    };
+                    beamRegistryRef.current[p2pBeamCode] = {
+                      title: effectiveTitle,
+                      url: cleanUrl,
+                      ts: payload.ts,
+                    };
+                    try {
+                      localStorage.setItem('omarvio_p2p_beam_registry_v1', JSON.stringify(beamRegistryRef.current));
+                    } catch {
+                      // Ignore storage quota issues
+                    }
+                    if ('BroadcastChannel' in window) {
+                      const bc = new BroadcastChannel('omarvio_p2p_beam');
+                      bc.postMessage(payload);
+                      bc.close();
+                    }
+                    navigator.clipboard?.writeText(`${cleanUrl}`).catch(() => {});
+                    setP2pStatus('connected');
+                    onToast(`📡 বিম কোড ${p2pBeamCode} সক্রিয় হয়েছে — QR স্ক্যান বা কোড দিয়ে রিসিভ করুন`);
                   }}
                   className="w-full py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20 active:scale-95 transition-all cursor-pointer"
                 >
@@ -705,7 +782,7 @@ export const SmartShareModal: React.FC<SmartShareModalProps> = ({
                     {p2pStatus === 'beaming'
                       ? 'বিমিং হচ্ছে...'
                       : p2pStatus === 'connected'
-                      ? 'বিম সম্পন্ন (Beamed)'
+                      ? 'বিম সক্রিয় (QR / কোড শেয়ার রেডি)'
                       : 'বর্তমান পেজটি বিম করুন (Beam Now)'}
                   </span>
                 </button>
@@ -714,7 +791,7 @@ export const SmartShareModal: React.FC<SmartShareModalProps> = ({
               {/* Receive Beam from Peer */}
               <div className="p-3.5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-2.5">
                 <span className="text-xs font-bold text-slate-200 block">
-                  অন্য ডিভাইস থেকে বিম রিসিভ করুন:
+                  অন্য ট্যাব / ডিভাইস থেকে বিম রিসিভ করুন:
                 </span>
                 <div className="flex items-center gap-2">
                   <input
@@ -727,16 +804,34 @@ export const SmartShareModal: React.FC<SmartShareModalProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      if (!receiveCodeInput.trim()) {
+                      const code = receiveCodeInput.trim().toUpperCase();
+                      if (!code) {
                         onToast('⚠️ অনুগ্রহ করে ৬-সংখ্যার বিম কোড লিখুন');
                         return;
                       }
+                      let latestRegistry = beamRegistryRef.current;
+                      try {
+                        const stored = JSON.parse(localStorage.getItem('omarvio_p2p_beam_registry_v1') || '{}');
+                        latestRegistry = { ...latestRegistry, ...stored };
+                      } catch {
+                        // Ignore malformed storage
+                      }
+                      const match = latestRegistry[code];
+                      if (!match) {
+                        onToast('❌ এই কোডের কোনো সক্রিয় বিম পাওয়া যায়নি (প্রথমে প্রেরক ডিভাইসে "Beam Now" চাপুন)');
+                        return;
+                      }
                       setReceivedBeamItem({
-                        title: 'বিম করা নিরাপদ পেজ',
-                        url: cleanUrl,
+                        title: match.title,
+                        url: match.url,
                       });
                       setP2pStatus('received');
-                      onToast('✅ WebRTC বিম সফলভাবে রিসিভ হয়েছে!');
+                      if ('BroadcastChannel' in window) {
+                        const bc = new BroadcastChannel('omarvio_p2p_beam');
+                        bc.postMessage({ type: 'BEAM_ACK', code });
+                        bc.close();
+                      }
+                      onToast('✅ WebRTC / ব্রডকাস্ট বিম সফলভাবে রিসিভ হয়েছে!');
                     }}
                     className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors cursor-pointer"
                   >
@@ -745,12 +840,20 @@ export const SmartShareModal: React.FC<SmartShareModalProps> = ({
                 </div>
 
                 {receivedBeamItem && (
-                  <div className="p-2.5 rounded-xl bg-emerald-950/40 border border-emerald-500/30 text-[11px] space-y-1 animate-fadeIn">
+                  <div className="p-2.5 rounded-xl bg-emerald-950/40 border border-emerald-500/30 text-[11px] space-y-1.5 animate-fadeIn">
                     <span className="text-emerald-400 font-bold flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       পেয়ার সফল: {receivedBeamItem.title}
                     </span>
                     <p className="font-mono text-cyan-300 break-all">{receivedBeamItem.url}</p>
+                    <a
+                      href={receivedBeamItem.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-300 underline hover:text-white"
+                    >
+                      নতুন ট্যাবে ওপেন করুন →
+                    </a>
                   </div>
                 )}
               </div>

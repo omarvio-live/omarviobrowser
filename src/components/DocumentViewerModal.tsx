@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { DownloadedItem } from './DownloadsModal';
-import { FileText, ZoomIn, ZoomOut, Moon, Sun, BookOpen, X, Download, ArrowLeft } from 'lucide-react';
+import { FileText, ZoomIn, ZoomOut, BookOpen, X, ArrowLeft } from 'lucide-react';
 
 interface DocumentViewerModalProps {
   documentItem: DownloadedItem | null;
@@ -16,12 +16,38 @@ interface DocumentViewerModalProps {
 export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
   documentItem,
   onClose,
-  onToast,
 }) => {
   const [zoomLevel, setZoomLevel] = useState(100);
   const [theme, setTheme] = useState<'dark' | 'sepia' | 'light'>('dark');
+  const [loadedText, setLoadedText] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!documentItem) {
+      setLoadedText(null);
+      return;
+    }
+    if (documentItem.content) {
+      setLoadedText(documentItem.content);
+      return;
+    }
+    if (documentItem.url && documentItem.url.startsWith('blob:')) {
+      fetch(documentItem.url)
+        .then((r) => r.text())
+        .then((txt) => setLoadedText(txt))
+        .catch(() => setLoadedText(null));
+    } else {
+      setLoadedText(null);
+    }
+  }, [documentItem]);
 
   if (!documentItem) return null;
+
+  const paragraphs = loadedText
+    ? loadedText
+        .split(/\n{2,}/)
+        .map((p) => p.trim())
+        .filter(Boolean)
+    : null;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col animate-fadeIn select-none">
@@ -124,29 +150,44 @@ export const DocumentViewerModal: React.FC<DocumentViewerModalProps> = ({
             <p className="text-xs opacity-75">
               Verified Clean Document · Rendered Locally Offline
             </p>
+            {documentItem.sourceUrl && (
+              <p className="text-[10px] font-mono text-cyan-400 truncate mt-1">
+                {documentItem.sourceUrl}
+              </p>
+            )}
           </div>
 
-          {/* Sample Document Content Rendering */}
-          <div className="space-y-4 text-xs sm:text-sm leading-relaxed font-serif">
-            <p className="font-semibold italic">
-              &ldquo;My Phone, My Data – Why Surrender It To Others!&rdquo; — Official Manifesto of OMARVIO GLOBAL LTD.
-            </p>
-            <p>
-              This document was opened directly inside <strong>OMARVIO BROWSER</strong> without needing any external bloated third-party reader (like Adobe Acrobat or WPS Office). All rendering, typography parsing, and memory isolation happen 100% locally on your device.
-            </p>
-            <h2 className="text-base font-bold pt-2 border-t border-inherit">
-              1. Principle of Client-Side Privacy
-            </h2>
-            <p>
-              Your phone belongs to you. Every document you download, every page you visit, and every media stream you listen to remains in your personal encrypted vault. Big Tech telemetry and surveillance bots are blocked at the perimeter.
-            </p>
-            <h2 className="text-base font-bold pt-2 border-t border-inherit">
-              2. Zero-Server Cost Sustainability
-            </h2>
-            <p>
-              By utilizing client-side Service Worker proxy engines and Edge DNS routing, OMARVIO BROWSER delivers unlimited bandwidth and zero server costs forever.
-            </p>
-          </div>
+          {/* Document Content Rendering */}
+          {paragraphs && paragraphs.length > 0 ? (
+            <div className="space-y-4 text-xs sm:text-sm leading-relaxed font-serif select-text">
+              {paragraphs.map((para, index) => (
+                <p key={index} className="whitespace-pre-wrap">
+                  {para}
+                </p>
+              ))}
+            </div>
+          ) : (
+            <div className="space-y-4 text-xs sm:text-sm leading-relaxed font-serif">
+              <p className="font-semibold italic">
+                &ldquo;My Phone, My Data – Why Surrender It To Others!&rdquo; — Official Manifesto of OMARVIO GLOBAL LTD.
+              </p>
+              <p>
+                This document was opened directly inside <strong>OMARVIO BROWSER</strong> without needing any external bloated third-party reader (like Adobe Acrobat or WPS Office). All rendering, typography parsing, and memory isolation happen 100% locally on your device.
+              </p>
+              <h2 className="text-base font-bold pt-2 border-t border-inherit">
+                1. Principle of Client-Side Privacy
+              </h2>
+              <p>
+                Your phone belongs to you. Every document you download, every page you visit, and every media stream you listen to remains in your personal encrypted vault. Big Tech telemetry and surveillance bots are blocked at the perimeter.
+              </p>
+              <h2 className="text-base font-bold pt-2 border-t border-inherit">
+                2. Zero-Server Cost Sustainability
+              </h2>
+              <p>
+                By utilizing client-side Service Worker proxy engines and Edge DNS routing, OMARVIO BROWSER delivers unlimited bandwidth and zero server costs forever.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </div>

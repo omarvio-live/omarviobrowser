@@ -6,11 +6,65 @@
  * Local-only metrics (0% telemetry sent to servers).
  */
 
+import { Tab } from '../types/browser';
+
 interface PerfMetrics {
   lastTabSwitchMs: number;
   lastSearchMs: number;
   memoryGB: number;
   activeTabsAlive: number;
+}
+
+export interface TabEnergyProfile {
+  tabId: string;
+  title: string;
+  url: string;
+  domain: string;
+  isActive: boolean;
+  isSleeping: boolean;
+  isAlive: boolean;
+  estimatedMB: number;
+  energyScore: number;
+  isHighEnergy: boolean;
+  reasonBn: string;
+  reasonEn: string;
+}
+
+export interface ProcessMemorySnapshot {
+  usedHeapMB: number;
+  totalHeapMB: number;
+  heapLimitMB: number;
+  estimatedTabsMB: number;
+  totalProcessMB: number;
+  percentUsed: number;
+  isLiveHeapApi: boolean;
+  aliveCount: number;
+  sleepingCount: number;
+  highEnergyCount: number;
+  tabProfiles: TabEnergyProfile[];
+}
+
+const HEAVY_MEDIA_HOSTS = [
+  'youtube.com',
+  'youtu.be',
+  'facebook.com',
+  'fb.watch',
+  'instagram.com',
+  'tiktok.com',
+  'twitch.tv',
+  'vimeo.com',
+  'netflix.com',
+  'soundcloud.com',
+  'spotify.com',
+];
+
+function extractDomainLabel(url: string): string {
+  if (!url) return 'New Tab';
+  try {
+    return new URL(url.startsWith('http') ? url : `https://${url}`).hostname.replace(/^www\./i, '');
+  } catch {
+    return url.slice(0, 32);
+  }
 }
 
 const metrics: PerfMetrics = {
@@ -41,4 +95,168 @@ export function recordSearchLatency(ms: number) {
 
 export function getLocalMetrics(): PerfMetrics {
   return { ...metrics };
+}
+
+/**
+ * Computes real-time process memory usage (using Chrome performance.memory JS heap API when available)
+ * and scores each open tab to detect High-Energy tabs for manual Sleep / Close controls.
+ */
+export function getRealtimeProcessMemorySnapshot(
+  tabs: Tab[],
+  aliveTabIds: string[],
+  activeTabId: string,
+  activeMediaUrl: string | null = null,
+  energySaverActive = false
+): ProcessMemorySnapshot {
+  const perfMem =
+    typeof performance !== 'undefined' ? (performance as any).memory : undefined;
+  const isLiveHeapApi = Boolean(
+    perfMem && typeof perfMem.usedJSHeapSize === 'number' && perfMem.usedJSHeapSize > 0
+  );
+
+  const usedHeapMB = isLiveHeapApi
+    ? Math.round((perfMem.usedJSHeapSize / (1024 * 1024)) * 10) / 10
+    : 28;
+  const totalHeapMB = isLiveHeapApi
+    ? Math.round((perfMem.totalJSHeapSize / (1024 * 1024)) * 10) / 10
+    : 48;
+  const heapLimitMB = isLiveHeapApi
+    ? Math.round(perfMem.jsHeapSizeLimit / (1024 * 1024))
+    : Math.max(512, (metrics.memoryGB || 4) * 256);
+
+  let estimatedTabsMB = 0;
+  let aliveCount = 0;
+  let sleepingCount = 0;
+
+  const tabProfiles: TabEnergyProfile[] = tabs.map((tab) => {
+    const isActive = tab.id === activeTabId;
+    const isWebTab = Boolean(tab.url);
+    const isAlive = isWebTab && !tab.isSleeping && aliveTabIds.includes(tab.id);
+    const isSleeping = isWebTab && !isAlive;
+
+    if (!isWebTab) {
+      return {
+        tabId: tab.id,
+        title: tab.title || 'Home',
+        url: '',
+        domain: 'omarvio://home',
+        isActive,
+        isSleeping: false,
+        isAlive: true,
+        estimatedMB: 6,
+        energyScore: 5,
+        isHighEnergy: false,
+        reasonBn: 'হালকা হোম স্ক্রিন',
+        reasonEn: 'Lightweight home tab',
+      };
+    }
+
+    if (isSleeping) {
+      sleepingCount += 1;
+      return {
+        tabId: tab.id,
+        title: tab.title || extractDomainLabel(tab.url),
+        url: tab.url,
+        domain: extractDomainLabel(tab.url),
+        isActive,
+        isSleeping: true,
+        isAlive: false,
+        estimatedMB: 0,
+        energyScore: 0,
+        isHighEnergy: false,
+        reasonBn: 'স্লিপিং মোড · ০MB',
+        reasonEn: 'Sleeping · 0 MB',
+      };
+    }
+
+    aliveCount += 1;
+    const domain = extractDomainLabel(tab.url);
+    const lowerUrl = tab.url.toLowerCase();
+    const hasHeavyMedia =
+      Boolean(activeMediaUrl && activeMediaUrl === tab.url) ||
+      HEAVY_MEDIA_HOSTS.some((h) => domain.includes(h) || lowerUrl.includes(h));
+
+    let energyScore = isActive ? 22 : 46;
+    let tabMB = energySaverActive ? 34 : 46;
+    const reasonsBn: string[] = [];
+    const reasonsEn: string[] = [];
+
+    if (!isActive) {
+      reasonsBn.push('ব্যাকগ্রাউন্ডে সক্রিয়');
+      reasonsEn.push('Awake in background');
+      tabMB += 12;
+    } else {
+      reasonsBn.push('সক্রিয় ফোরগ্রাউন্ড ট্যাব');
+      reasonsEn.push('Active foreground');
+    }
+
+    if (hasHeavyMedia) {
+      energyScore += 36;
+      tabMB += 48;
+      reasonsBn.unshift('ভিডিও / মিডিয়া স্ট্রিম');
+      reasonsEn.unshift('Video / media playback');
+    }
+
+    if (tab.isLoading) {
+      energyScore += 18;
+      tabMB += 16;
+      reasonsBn.push('রেন্ডারিং চলছে');
+      reasonsEn.push('Loading scripts');
+    }
+
+    if (tab.isDesktopMode) {
+      energyScore += 14;
+      tabMB += 18;
+      reasonsBn.push('ডেস্কটপ ভিউপোর্ট');
+      reasonsEn.push('Desktop viewport');
+    }
+
+    if (tab.isReadingMode) {
+      energyScore = Math.max(10, energyScore - 15);
+      tabMB = Math.max(18, tabMB - 16);
+    }
+
+    const clampedScore = Math.min(100, energyScore);
+    const isHighEnergy = clampedScore >= 45 || (hasHeavyMedia && !tab.isReadingMode);
+    estimatedTabsMB += tabMB;
+
+    return {
+      tabId: tab.id,
+      title: tab.title || domain,
+      url: tab.url,
+      domain,
+      isActive,
+      isSleeping: false,
+      isAlive: true,
+      estimatedMB: tabMB,
+      energyScore: clampedScore,
+      isHighEnergy,
+      reasonBn: reasonsBn.slice(0, 2).join(' · '),
+      reasonEn: reasonsEn.slice(0, 2).join(' · '),
+    };
+  });
+
+  const homeTabsMB = tabs.filter((t) => !t.url).length * 6;
+  const totalProcessMB = Math.round((usedHeapMB + estimatedTabsMB + homeTabsMB) * 10) / 10;
+  const baselineCeilingMB = isLiveHeapApi
+    ? Math.max(256, Math.min(heapLimitMB, 768))
+    : Math.max(256, (metrics.memoryGB || 4) * 192);
+  const percentUsed = Math.min(100, Math.max(4, Math.round((totalProcessMB / baselineCeilingMB) * 100)));
+
+  const sortedProfiles = [...tabProfiles].sort((a, b) => b.energyScore - a.energyScore);
+  const highEnergyCount = sortedProfiles.filter((p) => p.isHighEnergy).length;
+
+  return {
+    usedHeapMB,
+    totalHeapMB,
+    heapLimitMB,
+    estimatedTabsMB: Math.round(estimatedTabsMB + homeTabsMB),
+    totalProcessMB,
+    percentUsed,
+    isLiveHeapApi,
+    aliveCount,
+    sleepingCount,
+    highEnergyCount,
+    tabProfiles: sortedProfiles,
+  };
 }

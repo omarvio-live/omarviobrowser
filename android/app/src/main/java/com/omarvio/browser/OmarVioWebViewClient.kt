@@ -24,7 +24,8 @@ class OmarVioWebViewClient(
     private val onUrlChanged: (String) -> Unit,
     private val onLoadingStateChanged: (Boolean) -> Unit,
     private val onBackNavigationChanged: ((canGoBack: Boolean, canGoForward: Boolean) -> Unit)? = null,
-    private val onHttpsOnlyWarning: ((httpUrl: String, httpsUrl: String, reason: String) -> Unit)? = null
+    private val onHttpsOnlyWarning: ((httpUrl: String, httpsUrl: String, reason: String) -> Unit)? = null,
+    private val isDesktopModeProvider: () -> Boolean = { false }
 ) : WebViewClient() {
 
     override fun shouldInterceptRequest(
@@ -124,6 +125,7 @@ class OmarVioWebViewClient(
         super.doUpdateVisitedHistory(view, url, isReload)
         url?.let { onUrlChanged(it) }
         view?.let {
+            injectViewportAndScaling(it, isDesktopModeProvider())
             onBackNavigationChanged?.invoke(
                 WebBackNavigationManager.canNavigateBack(it),
                 WebBackNavigationManager.canNavigateForward(it)
@@ -189,6 +191,113 @@ class OmarVioWebViewClient(
         super.onReceivedHttpError(view, request, errorResponse)
     }
 
+    private fun injectViewportAndScaling(view: WebView?, isDesktop: Boolean) {
+        if (view == null) return
+        val viewportScript = if (isDesktop) {
+            """
+            (function() {
+                try {
+                    var targetW = 1280;
+                    var sw = Math.min(window.screen.width || 390, window.innerWidth || 390);
+                    var scale = Math.max(0.25, Math.min(1.0, (sw > 0 ? sw : 390) / targetW)).toFixed(3);
+                    var content = 'width=' + targetW + ', initial-scale=' + scale + ', minimum-scale=0.2, maximum-scale=5.0, user-scalable=yes';
+                    window.__omarvioExpectedViewport = content;
+                    function applyViewport() {
+                        var metas = document.querySelectorAll('meta[name="viewport"], meta[name="VIEWPORT"]');
+                        if (metas.length > 0) {
+                            for (var i = 0; i < metas.length; i++) {
+                                if (i > 0) {
+                                    metas[i].parentNode && metas[i].parentNode.removeChild(metas[i]);
+                                } else if (metas[i].getAttribute('content') !== window.__omarvioExpectedViewport) {
+                                    metas[i].setAttribute('content', window.__omarvioExpectedViewport);
+                                }
+                            }
+                        } else {
+                            var head = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
+                            if (head) {
+                                var m = document.createElement('meta');
+                                m.setAttribute('name', 'viewport');
+                                m.setAttribute('content', window.__omarvioExpectedViewport);
+                                head.insertBefore(m, head.firstChild);
+                            }
+                        }
+                    }
+                    applyViewport();
+                    if (!window.__omarvioViewportObserverInstalled && document.documentElement && typeof MutationObserver !== 'undefined') {
+                        window.__omarvioViewportObserverInstalled = true;
+                        new MutationObserver(function() { applyViewport(); }).observe(document.documentElement, {
+                            childList: true,
+                            subtree: true,
+                            attributes: true,
+                            attributeFilter: ['content', 'name']
+                        });
+                    }
+                    var cssHost = document.head || document.documentElement;
+                    if (cssHost) {
+                        var st = document.getElementById('omarvio-viewport-css');
+                        if (!st) {
+                            st = document.createElement('style');
+                            st.id = 'omarvio-viewport-css';
+                            cssHost.appendChild(st);
+                        }
+                        st.textContent = 'html, body { min-width: 1280px !important; -webkit-text-size-adjust: 100% !important; text-size-adjust: 100% !important; }';
+                    }
+                } catch(e) {}
+            })();
+            """.trimIndent()
+        } else {
+            """
+            (function() {
+                try {
+                    var content = 'width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover';
+                    window.__omarvioExpectedViewport = content;
+                    function applyViewport() {
+                        var metas = document.querySelectorAll('meta[name="viewport"], meta[name="VIEWPORT"]');
+                        if (metas.length > 0) {
+                            for (var i = 0; i < metas.length; i++) {
+                                if (i > 0) {
+                                    metas[i].parentNode && metas[i].parentNode.removeChild(metas[i]);
+                                } else if (metas[i].getAttribute('content') !== window.__omarvioExpectedViewport) {
+                                    metas[i].setAttribute('content', window.__omarvioExpectedViewport);
+                                }
+                            }
+                        } else {
+                            var head = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
+                            if (head) {
+                                var m = document.createElement('meta');
+                                m.setAttribute('name', 'viewport');
+                                m.setAttribute('content', window.__omarvioExpectedViewport);
+                                head.insertBefore(m, head.firstChild);
+                            }
+                        }
+                    }
+                    applyViewport();
+                    if (!window.__omarvioViewportObserverInstalled && document.documentElement && typeof MutationObserver !== 'undefined') {
+                        window.__omarvioViewportObserverInstalled = true;
+                        new MutationObserver(function() { applyViewport(); }).observe(document.documentElement, {
+                            childList: true,
+                            subtree: true,
+                            attributes: true,
+                            attributeFilter: ['content', 'name']
+                        });
+                    }
+                    var cssHost = document.head || document.documentElement;
+                    if (cssHost) {
+                        var st = document.getElementById('omarvio-viewport-css');
+                        if (!st) {
+                            st = document.createElement('style');
+                            st.id = 'omarvio-viewport-css';
+                            cssHost.appendChild(st);
+                        }
+                        st.textContent = 'html, body { width: 100% !important; max-width: 100vw !important; overflow-x: hidden !important; -webkit-text-size-adjust: 100% !important; text-size-adjust: 100% !important; } img, video, iframe, canvas, svg, table { max-width: 100%; }';
+                    }
+                } catch(e) {}
+            })();
+            """.trimIndent()
+        }
+        view.evaluateJavascript(viewportScript, null)
+    }
+
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
         onLoadingStateChanged(true)
@@ -199,6 +308,7 @@ class OmarVioWebViewClient(
                 WebBackNavigationManager.canNavigateForward(it)
             )
         }
+        injectViewportAndScaling(view, isDesktopModeProvider())
     }
 
     override fun onPageFinished(view: WebView?, url: String?) {
@@ -212,6 +322,8 @@ class OmarVioWebViewClient(
                 WebBackNavigationManager.canNavigateForward(it)
             )
         }
+
+        injectViewportAndScaling(view, isDesktopModeProvider())
 
         val css = AdBlockEngine.cosmeticSuppressionCss()
         if (AdBlockEngine.adBlockEnabled && css.isNotEmpty()) {

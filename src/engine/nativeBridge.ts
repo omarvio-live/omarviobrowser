@@ -23,8 +23,19 @@ export interface OmarvioAndroidBridge {
   checkAppUpdate?: () => void;
   openNativeSettings?: () => void;
   clearAllData?: () => void;
+  setEnergySaver?: (enabled: boolean) => void;
   getAppVersion?: () => string;
   getBlockedCount?: () => number;
+  pinToHomeScreen?: (url: string, title: string) => boolean;
+}
+
+export interface ApkReleaseStatus {
+  version: string;
+  versionCode: number;
+  directApkUrl: string;
+  githubRepo?: string | null;
+  hasLocalBinary?: boolean;
+  sha256?: string;
 }
 
 declare global {
@@ -190,3 +201,61 @@ export function clearNativeAndroidBrowsingData(): void {
     window.OmarvioAndroid?.clearAllData?.();
   } catch {}
 }
+
+export function syncEnergySaverWithAndroid(enabled: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.OmarvioAndroid?.setEnergySaver?.(enabled);
+  } catch {}
+}
+
+export function pinWebsiteToAndroidHomeScreen(url: string, title: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    if (typeof window.OmarvioAndroid?.pinToHomeScreen === 'function') {
+      return Boolean(window.OmarvioAndroid.pinToHomeScreen(url, title));
+    }
+  } catch {}
+  return false;
+}
+
+export async function fetchLiveApkReleaseStatus(): Promise<ApkReleaseStatus | null> {
+  if (typeof window === 'undefined') return null;
+  const ts = Date.now();
+  try {
+    const res = await fetch(`/api/apk-status?t=${ts}`, { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.version) {
+        return {
+          version: String(data.version),
+          versionCode: Number(data.versionCode || 0),
+          directApkUrl: String(data.directApkUrl || '/api/download-apk?direct=1'),
+          githubRepo: data.githubRepo ?? null,
+          hasLocalBinary: Boolean(data.hasLocalBinary),
+          sha256: data.sha256 ? String(data.sha256) : undefined,
+        };
+      }
+    }
+  } catch {}
+
+  try {
+    const fallbackRes = await fetch(`/apk-release.json?t=${ts}`, { cache: 'no-store' });
+    if (fallbackRes.ok) {
+      const data = await fallbackRes.json();
+      if (data && data.version) {
+        return {
+          version: String(data.version),
+          versionCode: Number(data.versionCode || 0),
+          directApkUrl: String(data.directApkUrl || '/api/download-apk?direct=1'),
+          githubRepo: data.githubRepo ?? null,
+          hasLocalBinary: false,
+          sha256: data.sha256 ? String(data.sha256) : undefined,
+        };
+      }
+    }
+  } catch {}
+
+  return null;
+}
+

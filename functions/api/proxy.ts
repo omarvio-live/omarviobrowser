@@ -202,12 +202,14 @@ export const onRequest: PagesFunction<Env> = async (context) => {
   const aggressiveTrackerBlocking = urlObj.searchParams.get('tb') !== '0';
   const adsFiltering = urlObj.searchParams.get('af') !== '0';
   const httpsOnlyMode = urlObj.searchParams.get('ho') !== '0';
+  const isDesktopMode = urlObj.searchParams.get('desktop') === '1';
   const allowHttpBypass = urlObj.searchParams.get('allowHttp') === '1';
   const rawListsParam = urlObj.searchParams.get('lists');
   const lists = edgeParseEnabledLists(rawListsParam);
   const tbFlag = aggressiveTrackerBlocking ? '1' : '0';
   const afFlag = adsFiltering ? '1' : '0';
   const hoFlag = httpsOnlyMode ? '1' : '0';
+  const desktopFlag = isDesktopMode ? '1' : '0';
   const listsQueryVal = encodeURIComponent(
     (Object.keys(lists) as Array<keyof EdgeEnabledLists>).filter((k) => lists[k]).join(',')
   );
@@ -257,8 +259,22 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         }
       }
       targetUrl = u.toString();
+    } else if (isDesktopMode) {
+      if (host === 'm.youtube.com' || host === 'youtube.com' || host === 'm.m.youtube.com') {
+        u.hostname = 'www.youtube.com';
+        u.searchParams.delete('persist_app');
+        u.searchParams.set('app', 'desktop');
+        targetUrl = u.toString();
+      } else if (host === 'm.facebook.com' || host === 'mbasic.facebook.com' || host === 'facebook.com' || host === 'm.m.facebook.com' || host === 'www.m.facebook.com') {
+        u.hostname = 'www.facebook.com';
+        targetUrl = u.toString();
+      } else if (host === 'm.wikipedia.org' || host === 'wikipedia.org' || host === 'm.m.wikipedia.org') {
+        u.hostname = 'www.wikipedia.org';
+        targetUrl = u.toString();
+      }
     } else if (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.m.youtube.com') {
       u.hostname = 'm.youtube.com';
+      if (u.searchParams.get('app') === 'desktop') u.searchParams.delete('app');
       targetUrl = u.toString();
     } else if (host === 'facebook.com' || host === 'www.facebook.com' || host === 'm.m.facebook.com' || host === 'www.m.facebook.com') {
       u.hostname = 'm.facebook.com';
@@ -316,8 +332,9 @@ export const onRequest: PagesFunction<Env> = async (context) => {
 
   try {
     const edgeFetchHeaders: Record<string, string> = {
-      'User-Agent':
-        'Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
+      'User-Agent': isDesktopMode
+        ? 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        : 'Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
       'Accept':
         'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
@@ -636,15 +653,20 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         ''
       );
 
-      // 2. Inject <base href="...">
-      const baseTag = `<base href="${finalUrl}">`;
+      // 2. Inject <base href="..."> and clean responsive/desktop viewport
+      html = html.replace(/<meta\b[^>]*\bname\s*=\s*["']?viewport["']?[^>]*>/gi, '');
+      const enforcedViewportContent = isDesktopMode
+        ? 'width=1280, initial-scale=1.0, minimum-scale=0.25, maximum-scale=5.0, user-scalable=yes'
+        : 'width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover';
+      const baseAndViewport = `<base href="${finalUrl}"><meta name="viewport" content="${enforcedViewportContent}">`;
       if (/<head[^>]*>/i.test(html)) {
-        html = html.replace(/<head[^>]*>/i, `$&${baseTag}`);
+        html = html.replace(/<head[^>]*>/i, `$&${baseAndViewport}`);
       } else {
-        html = `${baseTag}${html}`;
+        html = `${baseAndViewport}${html}`;
       }
 
       // 3. Inject OmarVio navigation interceptor & conditional anti-ad/anti-popup script
+      const edgePrivacyFlags = `&tb=${tbFlag}&af=${afFlag}&ho=${hoFlag}&desktop=${desktopFlag}&lists=${listsQueryVal}`;
       const adCoreCss =
         adsFiltering && lists.easylist
           ? `.ytp-ad-module, .ytp-ad-player-overlay, .ytp-ad-text, .video-ads, .ad-container, .ad-interrupting,
@@ -696,12 +718,16 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         </script>`
         : '';
       const interceptor = `
-        <style>
-          html {
+        <style id="omarvio-viewport-style">
+          html, body {
+            -webkit-text-size-adjust: 100% !important;
+            text-size-adjust: 100% !important;
             -webkit-overflow-scrolling: touch !important;
             touch-action: pan-x pan-y pinch-zoom !important;
             overscroll-behavior-y: contain !important;
+            ${isDesktopMode ? 'min-width: 1280px !important;' : 'width: 100% !important; max-width: 100vw !important; overflow-x: hidden !important;'}
           }
+          ${!isDesktopMode ? 'img, video, iframe, canvas, svg, table { max-width: 100%; }' : ''}
           ${adCssBlock}
         </style>
         ${adSkipScriptBlock}
@@ -709,6 +735,32 @@ export const onRequest: PagesFunction<Env> = async (context) => {
           (function() {
             var realParent = window.parent;
             var speculativeUrl = null;
+            var edgeFlags = '${edgePrivacyFlags}';
+            var expectedViewport = '${enforcedViewportContent}';
+
+            function enforceViewportOverride() {
+              try {
+                var metas = document.querySelectorAll('meta[name="viewport"], meta[name="VIEWPORT"]');
+                if (metas.length === 0) {
+                  var head = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
+                  if (head) {
+                    var m = document.createElement('meta');
+                    m.setAttribute('name', 'viewport');
+                    m.setAttribute('content', expectedViewport);
+                    head.insertBefore(m, head.firstChild);
+                  }
+                } else {
+                  for (var vi = 0; vi < metas.length; vi++) {
+                    if (vi > 0) {
+                      metas[vi].parentNode && metas[vi].parentNode.removeChild(metas[vi]);
+                    } else if (metas[vi].getAttribute('content') !== expectedViewport) {
+                      metas[vi].setAttribute('content', expectedViewport);
+                    }
+                  }
+                }
+              } catch(e) {}
+            }
+
             try {
               if (realParent && realParent !== window) {
                 realParent.postMessage({ type: 'OMARVIO_PROXY_READY', url: ${JSON.stringify(finalUrl)} }, '*');
@@ -732,10 +784,26 @@ export const onRequest: PagesFunction<Env> = async (context) => {
                 }
               } catch(e) {}
             }
+            enforceViewportOverride();
             enforceSelfNavigation();
             if (document.readyState === 'loading') {
-              document.addEventListener('DOMContentLoaded', enforceSelfNavigation);
+              document.addEventListener('DOMContentLoaded', function() {
+                enforceViewportOverride();
+                enforceSelfNavigation();
+              });
             }
+            try {
+              var vpObserver = new MutationObserver(function() {
+                enforceViewportOverride();
+                enforceSelfNavigation();
+              });
+              vpObserver.observe(document.documentElement || document.body, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['target', 'content', 'name']
+              });
+            } catch(e) {}
 
             try {
               window.open = function(url) {
@@ -745,7 +813,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
                     if (realParent && realParent !== window) {
                       realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: absoluteUrl }, '*');
                     }
-                    window.location.href = '/api/proxy?url=' + encodeURIComponent(absoluteUrl);
+                    window.location.href = '/api/proxy?url=' + encodeURIComponent(absoluteUrl) + edgeFlags;
                   } catch(err) {
                     if (realParent && realParent !== window) {
                       realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: url }, '*');
@@ -827,12 +895,12 @@ export const onRequest: PagesFunction<Env> = async (context) => {
                   if (realParent && realParent !== window) {
                     realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: target }, '*');
                   }
-                  window.location.href = '/api/proxy?url=' + encodeURIComponent(target);
+                  window.location.href = '/api/proxy?url=' + encodeURIComponent(target) + edgeFlags;
                 } catch(err) {
                   if (realParent && realParent !== window) {
                     realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: a.href || rawHref }, '*');
                   }
-                  window.location.href = '/api/proxy?url=' + encodeURIComponent(a.href || rawHref);
+                  window.location.href = '/api/proxy?url=' + encodeURIComponent(a.href || rawHref) + edgeFlags;
                 }
               }
             }, true);
@@ -859,7 +927,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
                     if (realParent && realParent !== window) {
                       realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: searchDest }, '*');
                     }
-                    window.location.href = '/api/proxy?url=' + encodeURIComponent(searchDest);
+                    window.location.href = '/api/proxy?url=' + encodeURIComponent(searchDest) + edgeFlags;
                     return;
                   }
                   if (method === 'GET' && action) {
@@ -870,7 +938,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
                     if (realParent && realParent !== window) {
                       realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: resolvedAction.href }, '*');
                     }
-                    window.location.href = '/api/proxy?url=' + encodeURIComponent(resolvedAction.href);
+                    window.location.href = '/api/proxy?url=' + encodeURIComponent(resolvedAction.href) + edgeFlags;
                   }
                 } catch(err) {}
               }
@@ -913,7 +981,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
                     if (realParent && realParent !== window) {
                       realParent.postMessage({ type: 'OMARVIO_NAVIGATE', url: resolved }, '*');
                     }
-                    return origPushState.call(window.history, state, title, '/api/proxy?url=' + encodeURIComponent(resolved));
+                    return origPushState.call(window.history, state, title, '/api/proxy?url=' + encodeURIComponent(resolved) + edgeFlags);
                   }
                   return origPushState.apply(window.history, arguments);
                 } catch(e) {}
@@ -922,7 +990,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
                 try {
                   if (url && typeof url === 'string' && !url.startsWith('/api/proxy')) {
                     var resolved = new URL(url, document.baseURI || '${finalUrl}').href;
-                    return origReplaceState.call(window.history, state, title, '/api/proxy?url=' + encodeURIComponent(resolved));
+                    return origReplaceState.call(window.history, state, title, '/api/proxy?url=' + encodeURIComponent(resolved) + edgeFlags);
                   }
                   return origReplaceState.apply(window.history, arguments);
                 } catch(e) {}

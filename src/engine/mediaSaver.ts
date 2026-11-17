@@ -24,6 +24,8 @@ export interface SavedDownloadItem {
   size: string;
   date: string;
   url: string;
+  sourceUrl?: string;
+  content?: string;
 }
 
 const STORAGE_KEY = 'omarvio_downloads_hub';

@@ -69,6 +69,23 @@
   padding-bottom: max(var(--sab), 0.5rem);
 }
 
+/* Energy Saver Mode: reduces non-essential UI animations, infinite loops, and GPU backdrop blurs */
+html.omarvio-energy-saver *,
+html.omarvio-energy-saver *::before,
+html.omarvio-energy-saver *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.05s !important;
+  scroll-behavior: auto !important;
+}
+
+html.omarvio-energy-saver .backdrop-blur-md,
+html.omarvio-energy-saver .backdrop-blur-sm,
+html.omarvio-energy-saver .backdrop-blur-xs {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
 /* Shared compact phone layout: keep the browser home readable at narrow widths. */
 @media (max-width: 480px) {
   #root header {

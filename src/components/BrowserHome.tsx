@@ -36,7 +36,12 @@ import {
   Trash2,
 } from 'lucide-react';
 import { getSanitizedSearchUrl } from '../engine/adblocker';
-import { isAndroidNativeShell, syncSearchEngineWithAndroid } from '../engine/nativeBridge';
+import {
+  isAndroidNativeShell,
+  syncSearchEngineWithAndroid,
+  fetchLiveApkReleaseStatus,
+  ApkReleaseStatus,
+} from '../engine/nativeBridge';
 import { getLanguage, subscribeLanguage, LanguageCode } from '../engine/i18n';
 import {
   SavedBookmark,
@@ -48,6 +53,7 @@ import {
   SearchEngineSelectorModal,
   SEARCH_ENGINES,
 } from './SearchEngineSelectorModal';
+import { subscribeBrowserEvent, emitBrowserEvent } from '../engine/eventBus';
 
 interface BrowserHomeProps {
   onNavigate: (url: string) => void;
@@ -304,14 +310,48 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
   const [trendingSetIndex, setTrendingSetIndex] = useState(0);
   const [recentBookmarks, setRecentBookmarks] = useState<SavedBookmark[]>(() => getBookmarks());
   const [lang, setLang] = useState<LanguageCode>(getLanguage);
+  const [apkStatus, setApkStatus] = useState<ApkReleaseStatus | null>(null);
 
   useEffect(() => {
     setRecentBookmarks(getBookmarks());
     const unsubBookmarks = subscribeBookmarks(setRecentBookmarks);
     const unsubLang = subscribeLanguage(setLang);
+    fetchLiveApkReleaseStatus().then((live) => {
+      if (live) setApkStatus(live);
+    });
+    const handleShortcutsUpdated = () => {
+      try {
+        const saved = localStorage.getItem('omarvio_shortcuts_v5');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setShortcuts(parsed);
+          }
+        }
+      } catch {
+        // Ignore malformed shortcuts
+      }
+    };
+    window.addEventListener('omarvio-shortcuts-updated', handleShortcutsUpdated);
+    const unsubShortcutsBus = subscribeBrowserEvent('SHORTCUTS_UPDATED', handleShortcutsUpdated);
+    const unsubBookmarksBus = subscribeBrowserEvent('BOOKMARK_UPDATED', () => {
+      setRecentBookmarks(getBookmarks());
+    });
+    const unsubApkBus = subscribeBrowserEvent('APK_UPDATE_AVAILABLE', (payload) => {
+      setApkStatus((prev) => ({
+        ...(prev || {}),
+        version: payload.version,
+        versionCode: payload.versionCode,
+        directApkUrl: payload.directApkUrl,
+      }));
+    });
     return () => {
       unsubBookmarks();
       unsubLang();
+      unsubShortcutsBus();
+      unsubBookmarksBus();
+      unsubApkBus();
+      window.removeEventListener('omarvio-shortcuts-updated', handleShortcutsUpdated);
     };
   }, []);
 
@@ -407,7 +447,11 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
       letter,
     };
 
-    setShortcuts((prev) => [...prev, newEntry]);
+    setShortcuts((prev) => {
+      const next = [...prev, newEntry];
+      emitBrowserEvent('SHORTCUTS_UPDATED', { count: next.length, latestUrl: finalUrl });
+      return next;
+    });
     setNewShortcutName('');
     setNewShortcutUrl('');
     setIsAddShortcutOpen(false);
@@ -415,7 +459,11 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
 
   const handleDeleteShortcut = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setShortcuts((prev) => prev.filter((s) => s.id !== id));
+    setShortcuts((prev) => {
+      const next = prev.filter((s) => s.id !== id);
+      emitBrowserEvent('SHORTCUTS_UPDATED', { count: next.length });
+      return next;
+    });
   };
 
   // Web Speech API Voice Search
@@ -925,14 +973,13 @@ export const BrowserHome: React.FC<BrowserHomeProps> = ({
                   অ্যান্ড্রয়েড নেটিভ APK
                 </p>
                 <p className="text-[11px] text-slate-400 truncate">
-                  v2.0.0.4 · ১০.৬ MB · সরাসরি ফোনে ইনস্টলযোগ্য
+                  v{apkStatus?.version || '2.0.0.14'} · সরাসরি ফোনে ইনস্টলযোগ্য
                 </p>
               </div>
             </div>
             <a
-              href="/api/download-apk"
-              target="_blank"
-              rel="noopener noreferrer"
+              href={apkStatus?.directApkUrl || '/api/download-apk?direct=1'}
+              download="omarvio-browser.apk"
               className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-all active:scale-95 shrink-0 cursor-pointer whitespace-nowrap"
             >
               <Download className="w-3.5 h-3.5" />

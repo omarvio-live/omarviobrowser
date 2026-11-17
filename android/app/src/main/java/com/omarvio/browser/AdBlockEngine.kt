@@ -2,11 +2,16 @@ package com.omarvio.browser
 
 import android.content.SharedPreferences
 import android.net.Uri
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -47,7 +52,22 @@ object AdBlockEngine {
     @Volatile
     var doNotTrackEnabled: Boolean = true
 
+    private const val PREF_HTTP_ALLOWED = "http_allowed_hosts_json"
+    private const val PREF_DYNAMIC_RULES = "dynamic_filter_lists_json"
+    private const val PREF_DYNAMIC_VERSION = "dynamic_filter_version"
+    private const val FILTER_LISTS_API_URL = "https://omarvio-browser.pages.dev/api/filter-lists"
+
     private val allowedHttpHosts = ConcurrentHashMap.newKeySet<String>()
+    private val dynamicEasyList = ConcurrentHashMap.newKeySet<String>()
+    private val dynamicEasyPrivacy = ConcurrentHashMap.newKeySet<String>()
+    private val dynamicPrivacyBadger = ConcurrentHashMap.newKeySet<String>()
+    private val dynamicPeterLowe = ConcurrentHashMap.newKeySet<String>()
+    private val dynamicMalware = ConcurrentHashMap.newKeySet<String>()
+
+    @Volatile
+    var dynamicFilterVersion: String = "Built-in 2026"
+    @Volatile
+    var dynamicRuleCount: Int = 0
 
     val blockedCount = AtomicInteger(0)
     private val _blockedCountFlow = MutableStateFlow(0)
@@ -64,6 +84,22 @@ object AdBlockEngine {
         httpsOnlyEnabled = prefs.getBoolean("https_only_enabled", true)
         doNotTrackEnabled = prefs.getBoolean("do_not_track_enabled", true)
         stripTrackingParamsEnabled = privacyBadgerEnabled || easyPrivacyEnabled || adBlockEnabled
+
+        allowedHttpHosts.clear()
+        try {
+            val arr = JSONArray(prefs.getString(PREF_HTTP_ALLOWED, "[]") ?: "[]")
+            for (i in 0 until arr.length()) {
+                val h = arr.optString(i).lowercase().trim()
+                if (h.isNotEmpty()) allowedHttpHosts.add(h)
+            }
+        } catch (_: Exception) {
+        }
+
+        dynamicFilterVersion = prefs.getString(PREF_DYNAMIC_VERSION, "Built-in 2026") ?: "Built-in 2026"
+        val rawDyn = prefs.getString(PREF_DYNAMIC_RULES, "") ?: ""
+        if (rawDyn.isNotBlank()) {
+            applyDynamicListsJson(rawDyn)
+        }
     }
 
     fun saveToPrefs(prefs: SharedPreferences) {
@@ -78,6 +114,12 @@ object AdBlockEngine {
             .putBoolean("https_only_enabled", httpsOnlyEnabled)
             .putBoolean("do_not_track_enabled", doNotTrackEnabled)
             .apply()
+    }
+
+    private fun saveAllowedHttpHosts(prefs: SharedPreferences) {
+        val arr = JSONArray()
+        allowedHttpHosts.forEach { arr.put(it) }
+        prefs.edit().putString(PREF_HTTP_ALLOWED, arr.toString()).apply()
     }
 
     fun applyJsonConfig(jsonStr: String, prefs: SharedPreferences? = null) {
@@ -104,14 +146,86 @@ object AdBlockEngine {
         }
     }
 
-    fun allowHttpHostOnce(urlOrHost: String) {
+    fun allowHttpHostOnce(urlOrHost: String, prefs: SharedPreferences? = null) {
         val h = extractHost(urlOrHost)
-        if (h.isNotEmpty()) allowedHttpHosts.add(h)
+        if (h.isNotEmpty()) {
+            allowedHttpHosts.add(h)
+            if (prefs != null) saveAllowedHttpHosts(prefs)
+        }
+    }
+
+    fun getAllowedHttpHostsList(): List<String> = allowedHttpHosts.toList().sorted()
+
+    fun revokeHttpHost(urlOrHost: String, prefs: SharedPreferences? = null) {
+        val h = extractHost(urlOrHost)
+        if (h.isNotEmpty()) {
+            allowedHttpHosts.remove(h)
+            if (prefs != null) saveAllowedHttpHosts(prefs)
+        }
+    }
+
+    fun clearAllAllowedHttpHosts(prefs: SharedPreferences? = null) {
+        allowedHttpHosts.clear()
+        if (prefs != null) saveAllowedHttpHosts(prefs)
     }
 
     fun isHttpAllowedForHost(urlOrHost: String): Boolean {
         val h = extractHost(urlOrHost)
         return h.isNotEmpty() && allowedHttpHosts.contains(h)
+    }
+
+    private fun applyDynamicListsJson(rawJson: String): Int {
+        return try {
+            val root = JSONObject(rawJson)
+            val listsObj = root.optJSONObject("lists") ?: root
+            fun fillSet(key: String, target: MutableSet<String>) {
+                val arr = listsObj.optJSONArray(key) ?: return
+                target.clear()
+                for (i in 0 until arr.length()) {
+                    val host = arr.optString(i).lowercase().trim()
+                    if (host.isNotEmpty()) target.add(host)
+                }
+            }
+            fillSet("easylist", dynamicEasyList)
+            fillSet("easyprivacy", dynamicEasyPrivacy)
+            fillSet("privacyBadger", dynamicPrivacyBadger)
+            fillSet("peterLowe", dynamicPeterLowe)
+            fillSet("malwarePhishing", dynamicMalware)
+            val count = dynamicEasyList.size + dynamicEasyPrivacy.size +
+                dynamicPrivacyBadger.size + dynamicPeterLowe.size + dynamicMalware.size
+            dynamicRuleCount = count
+            count
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    suspend fun refreshDynamicFilterLists(prefs: SharedPreferences): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        try {
+            val conn = (URL("$FILTER_LISTS_API_URL?t=${System.currentTimeMillis()}").openConnection() as HttpURLConnection).apply {
+                connectTimeout = 6000
+                readTimeout = 6000
+                requestMethod = "GET"
+                useCaches = false
+                setRequestProperty("Cache-Control", "no-cache")
+            }
+            if (conn.responseCode == 200) {
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                val root = JSONObject(body)
+                val ver = root.optString("version", "2026.11.16")
+                val count = applyDynamicListsJson(body)
+                if (count > 0) {
+                    dynamicFilterVersion = ver
+                    prefs.edit()
+                        .putString(PREF_DYNAMIC_RULES, body)
+                        .putString(PREF_DYNAMIC_VERSION, ver)
+                        .apply()
+                    return@withContext true to "$ver (+$count rules)"
+                }
+            }
+        } catch (_: Exception) {
+        }
+        false to dynamicFilterVersion
     }
 
     private fun extractHost(urlOrHost: String): String {
@@ -264,7 +378,7 @@ object AdBlockEngine {
         "ref_src", "ref_url"
     )
 
-    private fun hostMatchesSet(host: String, set: HashSet<String>): Boolean {
+    private fun hostMatchesSet(host: String, set: Collection<String>): Boolean {
         if (set.contains(host)) return true
         for (item in set) {
             if (host.endsWith(".$item")) return true
@@ -276,7 +390,8 @@ object AdBlockEngine {
         if (!malwarePhishingEnabled || urlStr.isNullOrBlank()) return false
         return try {
             val host = Uri.parse(urlStr).host?.lowercase() ?: return false
-            hostMatchesSet(host, MALWARE_HOSTS)
+            hostMatchesSet(host, MALWARE_HOSTS) ||
+                (dynamicMalware.isNotEmpty() && hostMatchesSet(host, dynamicMalware))
         } catch (_: Exception) {
             false
         }
@@ -292,23 +407,23 @@ object AdBlockEngine {
             val uri = Uri.parse(urlStr)
             val host = uri.host?.lowercase() ?: return false
 
-            if (malwarePhishingEnabled && hostMatchesSet(host, MALWARE_HOSTS)) {
+            if (malwarePhishingEnabled && (hostMatchesSet(host, MALWARE_HOSTS) || hostMatchesSet(host, dynamicMalware))) {
                 _blockedCountFlow.value = blockedCount.incrementAndGet()
                 return true
             }
-            if (easyListEnabled && hostMatchesSet(host, EASYLIST_AD_HOSTS)) {
+            if (easyListEnabled && (hostMatchesSet(host, EASYLIST_AD_HOSTS) || hostMatchesSet(host, dynamicEasyList))) {
                 _blockedCountFlow.value = blockedCount.incrementAndGet()
                 return true
             }
-            if (easyPrivacyEnabled && hostMatchesSet(host, EASYPRIVACY_HOSTS)) {
+            if (easyPrivacyEnabled && (hostMatchesSet(host, EASYPRIVACY_HOSTS) || hostMatchesSet(host, dynamicEasyPrivacy))) {
                 _blockedCountFlow.value = blockedCount.incrementAndGet()
                 return true
             }
-            if (privacyBadgerEnabled && hostMatchesSet(host, PRIVACY_BADGER_HOSTS)) {
+            if (privacyBadgerEnabled && (hostMatchesSet(host, PRIVACY_BADGER_HOSTS) || hostMatchesSet(host, dynamicPrivacyBadger))) {
                 _blockedCountFlow.value = blockedCount.incrementAndGet()
                 return true
             }
-            if (peterLoweEnabled && hostMatchesSet(host, PETER_LOWE_HOSTS)) {
+            if (peterLoweEnabled && (hostMatchesSet(host, PETER_LOWE_HOSTS) || hostMatchesSet(host, dynamicPeterLowe))) {
                 _blockedCountFlow.value = blockedCount.incrementAndGet()
                 return true
             }

@@ -14,6 +14,7 @@ interface ClearDataModalProps {
     cookies: boolean;
     cache: boolean;
     passwords: boolean;
+    timeRange: 'lastHour' | 'last24' | 'last7' | 'all';
   }) => void;
 }
 
@@ -26,12 +27,12 @@ export const ClearDataModal: React.FC<ClearDataModalProps> = ({
   const [cookies, setCookies] = useState(true);
   const [cache, setCache] = useState(true);
   const [passwords, setPasswords] = useState(false);
-  const [timeRange, setTimeRange] = useState('all');
+  const [timeRange, setTimeRange] = useState<'lastHour' | 'last24' | 'last7' | 'all'>('all');
 
   if (!isOpen) return null;
 
   const handleClear = () => {
-    onConfirmClear({ history, cookies, cache, passwords });
+    onConfirmClear({ history, cookies, cache, passwords, timeRange });
     onClose();
   };
 
@@ -63,8 +64,8 @@ export const ClearDataModal: React.FC<ClearDataModalProps> = ({
           <span className="text-[#9aa0a6]">Time range:</span>
           <select
             value={timeRange}
-            onChange={(e) => setTimeRange(e.target.value)}
-            className="bg-[#1f1f23] border border-[#3c4043] text-white text-xs rounded-xl px-2.5 py-1 focus:outline-none"
+            onChange={(e) => setTimeRange(e.target.value as 'lastHour' | 'last24' | 'last7' | 'all')}
+            className="bg-[#1f1f23] border border-[#3c4043] text-white text-xs rounded-xl px-2.5 py-1 focus:outline-none cursor-pointer"
           >
             <option value="lastHour">Last hour</option>
             <option value="last24">Last 24 hours</option>

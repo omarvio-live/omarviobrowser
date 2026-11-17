@@ -4,6 +4,8 @@
  */
 
 // Tracking parameters to sanitize from URLs (Google, Meta, WhatsApp, Messenger, Big Tech surveillance)
+import { emitBrowserEvent } from './eventBus';
+
 export const TRACKING_PARAMS = [
   'fbclid',
   'gclid',
@@ -135,16 +137,79 @@ export const PRIVACY_STORAGE_KEYS = {
 
 let privacyFilterListeners: Array<(settings: PrivacyFilterSettings) => void> = [];
 
-// Session-scoped host allow-list for HTTPS-Only user overrides ("Continue to HTTP Anyway")
-const sessionHttpAllowedHosts = new Set<string>();
+// Persisted host allow-list for HTTPS-Only user overrides ("Continue to HTTP Anyway")
+const HTTP_ALLOWED_STORAGE_KEY = 'omarvio_http_allowed_hosts';
+const DYNAMIC_RULES_STORAGE_KEY = 'omarvio_dynamic_filter_rules';
+const DYNAMIC_META_STORAGE_KEY = 'omarvio_dynamic_filter_meta';
+
+const loadPersistedAllowedHosts = (): string[] => {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(HTTP_ALLOWED_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.map((x) => String(x).toLowerCase().trim()).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+const sessionHttpAllowedHosts = new Set<string>(loadPersistedAllowedHosts());
+let httpExceptionListeners: Array<(hosts: string[]) => void> = [];
+
+const persistAllowedHttpHosts = () => {
+  const list = Array.from(sessionHttpAllowedHosts);
+  if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(HTTP_ALLOWED_STORAGE_KEY, JSON.stringify(list));
+    } catch {}
+  }
+  httpExceptionListeners.forEach((fn) => {
+    try {
+      fn(list);
+    } catch {}
+  });
+};
+
+export const getAllowedHttpHosts = (): string[] => Array.from(sessionHttpAllowedHosts);
+
+export const subscribeHttpExceptions = (fn: (hosts: string[]) => void): (() => void) => {
+  httpExceptionListeners.push(fn);
+  return () => {
+    httpExceptionListeners = httpExceptionListeners.filter((l) => l !== fn);
+  };
+};
 
 export const allowHttpHostOnce = (hostOrUrl: string): void => {
   try {
     const h = hostOrUrl.includes('://')
       ? new URL(hostOrUrl).hostname.toLowerCase()
       : hostOrUrl.toLowerCase().trim();
-    if (h) sessionHttpAllowedHosts.add(h);
+    if (h) {
+      sessionHttpAllowedHosts.add(h);
+      persistAllowedHttpHosts();
+    }
   } catch {}
+};
+
+export const revokeHttpHost = (hostOrUrl: string): string[] => {
+  try {
+    const h = hostOrUrl.includes('://')
+      ? new URL(hostOrUrl).hostname.toLowerCase()
+      : hostOrUrl.toLowerCase().trim();
+    if (h) {
+      sessionHttpAllowedHosts.delete(h);
+      persistAllowedHttpHosts();
+    }
+  } catch {}
+  return getAllowedHttpHosts();
+};
+
+export const clearAllAllowedHttpHosts = (): void => {
+  sessionHttpAllowedHosts.clear();
+  persistAllowedHttpHosts();
 };
 
 export const isHttpAllowedForHost = (hostOrUrl: string): boolean => {
@@ -155,6 +220,85 @@ export const isHttpAllowedForHost = (hostOrUrl: string): boolean => {
     return sessionHttpAllowedHosts.has(h);
   } catch {
     return false;
+  }
+};
+
+export interface FilterListSyncMeta {
+  version: string;
+  syncedAt: string;
+  extraRuleCount: number;
+}
+
+type DynamicFilterRuleMap = Partial<
+  Record<'easylist' | 'easyprivacy' | 'privacyBadger' | 'peterLowe' | 'malwarePhishing', string[]>
+>;
+
+const loadDynamicRules = (): DynamicFilterRuleMap => {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(DYNAMIC_RULES_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as DynamicFilterRuleMap) : {};
+  } catch {
+    return {};
+  }
+};
+
+let dynamicFilterRules: DynamicFilterRuleMap = loadDynamicRules();
+
+export const getFilterListSyncMeta = (): FilterListSyncMeta => {
+  if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    try {
+      const raw = localStorage.getItem(DYNAMIC_META_STORAGE_KEY);
+      if (raw) return JSON.parse(raw) as FilterListSyncMeta;
+    } catch {}
+  }
+  return {
+    version: 'Built-in 2026',
+    syncedAt: 'Not synced yet',
+    extraRuleCount: 0,
+  };
+};
+
+export const refreshDynamicFilterLists = async (): Promise<{
+  success: boolean;
+  meta: FilterListSyncMeta;
+}> => {
+  try {
+    const resp = await fetch(`/api/filter-lists?t=${Date.now()}`, { cache: 'no-store' });
+    if (!resp.ok) {
+      return { success: false, meta: getFilterListSyncMeta() };
+    }
+    const data = (await resp.json()) as {
+      version?: string;
+      updatedAt?: string;
+      lists?: DynamicFilterRuleMap;
+    };
+    const nextLists: DynamicFilterRuleMap = data.lists || {};
+    dynamicFilterRules = nextLists;
+
+    const count =
+      (nextLists.easylist?.length || 0) +
+      (nextLists.easyprivacy?.length || 0) +
+      (nextLists.privacyBadger?.length || 0) +
+      (nextLists.peterLowe?.length || 0) +
+      (nextLists.malwarePhishing?.length || 0);
+
+    const meta: FilterListSyncMeta = {
+      version: data.version || '2026.11.16',
+      syncedAt: new Date().toLocaleTimeString(),
+      extraRuleCount: count,
+    };
+
+    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(DYNAMIC_RULES_STORAGE_KEY, JSON.stringify(nextLists));
+        localStorage.setItem(DYNAMIC_META_STORAGE_KEY, JSON.stringify(meta));
+      } catch {}
+    }
+
+    return { success: true, meta };
+  } catch {
+    return { success: false, meta: getFilterListSyncMeta() };
   }
 };
 
@@ -236,6 +380,11 @@ export const setPrivacyFilterSettings = (
     try {
       fn({ ...next, enabledLists: { ...next.enabledLists } });
     } catch {}
+  });
+
+  emitBrowserEvent('PRIVACY_SETTINGS_UPDATED', {
+    ...next,
+    enabledLists: { ...next.enabledLists },
   });
 
   return next;
@@ -499,7 +648,9 @@ export const isMalwareOrPhishingUrl = (
   try {
     const parsed = new URL(rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`);
     const host = parsed.hostname.toLowerCase();
-    return matchesHostList(host, MALWARE_PHISHING_HOSTS);
+    if (matchesHostList(host, MALWARE_PHISHING_HOSTS)) return true;
+    const dynMalware = dynamicFilterRules.malwarePhishing;
+    return Boolean(dynMalware && matchesHostList(host, dynMalware));
   } catch {
     return false;
   }
@@ -517,15 +668,24 @@ export const isTrackerUrl = (
 
     if (lists.easyprivacy !== false) {
       if (matchesHostList(host, EASYPRIVACY_HOSTS)) return true;
+      if (dynamicFilterRules.easyprivacy && matchesHostList(host, dynamicFilterRules.easyprivacy)) {
+        return true;
+      }
       if (host.endsWith('facebook.com') && parsed.pathname.startsWith('/tr')) return true;
       if (TRACKER_PATH_REGEX.test(pathAndQuery)) return true;
     }
     if (lists.privacyBadger !== false) {
       if (matchesHostList(host, PRIVACY_BADGER_HEURISTIC_HOSTS)) return true;
+      if (dynamicFilterRules.privacyBadger && matchesHostList(host, dynamicFilterRules.privacyBadger)) {
+        return true;
+      }
       if (PRIVACY_BADGER_PATH_REGEX.test(pathAndQuery)) return true;
     }
-    if (lists.peterLowe !== false && matchesHostList(host, PETER_LOWE_HOSTS)) {
-      return true;
+    if (lists.peterLowe !== false) {
+      if (matchesHostList(host, PETER_LOWE_HOSTS)) return true;
+      if (dynamicFilterRules.peterLowe && matchesHostList(host, dynamicFilterRules.peterLowe)) {
+        return true;
+      }
     }
     return false;
   } catch {
@@ -545,10 +705,16 @@ export const isAdUrl = (
 
     if (lists.easylist !== false) {
       if (matchesHostList(host, EASYLIST_AD_HOSTS)) return true;
+      if (dynamicFilterRules.easylist && matchesHostList(host, dynamicFilterRules.easylist)) {
+        return true;
+      }
       if (AD_PATH_REGEX.test(pathAndQuery)) return true;
     }
-    if (lists.peterLowe !== false && matchesHostList(host, PETER_LOWE_HOSTS)) {
-      return true;
+    if (lists.peterLowe !== false) {
+      if (matchesHostList(host, PETER_LOWE_HOSTS)) return true;
+      if (dynamicFilterRules.peterLowe && matchesHostList(host, dynamicFilterRules.peterLowe)) {
+        return true;
+      }
     }
     return false;
   } catch {
@@ -1054,7 +1220,9 @@ export const incrementTrackerStat = (
     stats.adsDestroyed += 1;
   }
   stats.dataSavedMB = parseFloat((stats.dataSavedMB + bytes / (1024 * 1024)).toFixed(2));
-  listeners.forEach((fn) => fn({ ...stats }));
+  const snapshot = { ...stats };
+  listeners.forEach((fn) => fn(snapshot));
+  emitBrowserEvent('BLOCKED_STAT_UPDATED', snapshot);
 };
 
 export const subscribeAdblockStats = (fn: (s: typeof stats) => void) => {

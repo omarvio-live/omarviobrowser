@@ -133,12 +133,37 @@ class UnifiedBrowserActivity : ComponentActivity() {
             cacheMode = WebSettings.LOAD_DEFAULT
             safeBrowsingEnabled = true
         }
+        webView.setInitialScale(0)
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(webView, false)
         }
 
         webView.webViewClient = object : WebViewClient() {
+            private fun enforceViewport(view: WebView?) {
+                view?.evaluateJavascript(
+                    """
+                    (function(){try{
+                      var c='width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover';
+                      var ms=document.querySelectorAll('meta[name="viewport"], meta[name="VIEWPORT"]');
+                      if(ms.length===0){var h=document.head||document.documentElement;if(h){var m=document.createElement('meta');m.name='viewport';m.content=c;h.insertBefore(m,h.firstChild);}}
+                      else{for(var i=0;i<ms.length;i++){if(i>0){ms[i].remove();}else if(ms[i].getAttribute('content')!==c){ms[i].setAttribute('content',c);}}}
+                    }catch(e){}})();
+                    """.trimIndent(),
+                    null
+                )
+            }
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                enforceViewport(view)
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                enforceViewport(view)
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val uri = request?.url ?: return false
                 return when (uri.scheme?.lowercase()) {

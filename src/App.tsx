@@ -6,22 +6,15 @@
 
 import React, { useState, useEffect } from 'react';
 import {
-  Ghost,
   MoreVertical,
-  Plus,
   Languages,
-  Shield,
   ShieldCheck,
   ChevronLeft,
   ChevronRight,
   RotateCw,
   Home,
   Download,
-  Settings,
-  Zap,
   Share2,
-  QrCode,
-  MapPin,
   BookOpen,
 } from 'lucide-react';
 import { Tab } from './types/browser';
@@ -43,15 +36,37 @@ import { InAppAdBanner } from './components/InAppAdBanner';
 import { UrgentMessageBanner } from './components/UrgentMessageBanner';
 import { SplashScreen } from './components/SplashScreen';
 import { registerServiceWorker } from './engine/swRegister';
-import { computeAliveTabIds, getMaxAliveTabs } from './engine/tabManager';
+import {
+  computeAliveTabIds,
+  getMaxAliveTabs,
+  putTabToSleep,
+  wakeSleepingTab,
+  clearSleepingTab,
+} from './engine/tabManager';
 import { markTabSwitchStart, measureTabSwitchEnd } from './engine/metrics';
+import {
+  getEnergySaverEnabled,
+  toggleEnergySaver,
+  subscribeEnergySaver,
+  applyEnergySaverDomClass,
+} from './engine/energySaver';
 import {
   isAndroidNativeShell,
   openUrlInNativeAndroid,
   syncDesktopModeWithAndroid,
   clearNativeAndroidBrowsingData,
   openAndroidDownloadsHub,
+  fetchLiveApkReleaseStatus,
+  ApkReleaseStatus,
+  triggerAndroidAppUpdateCheck,
+  pinWebsiteToAndroidHomeScreen,
 } from './engine/nativeBridge';
+import {
+  emitBrowserEvent,
+  useBrowserEvent,
+  setGlobalPwaInstallPrompt,
+  getGlobalPwaInstallPrompt,
+} from './engine/eventBus';
 
 // Module M7: Code-split heavy modals with React.lazy
 const SettingsDrawer = React.lazy(() => import('./components/SettingsDrawer').then(m => ({ default: m.SettingsDrawer })));
@@ -72,14 +87,24 @@ import {
   initNativeDownloadObserver,
 } from './engine/proxy';
 import { unwrapAndSanitizeExternalUrl } from './engine/linkInterceptor';
-import { runAdblockerMiddleware } from './engine/adblocker';
+import {
+  runAdblockerMiddleware,
+  refreshDynamicFilterLists,
+  getAdblockStats,
+} from './engine/adblocker';
 import { detectRunningMedia, DetectedMedia } from './engine/mediaSaver';
+import { saveActiveWebpageOffline } from './engine/inAppDownloader';
 import { updateLockScreenMediaSession } from './engine/media';
 import { toggleOledDarkMode, getOledDarkStatus } from './engine/darkMode';
 import { auditUrlSecurity, SecurityAuditResult } from './engine/security';
 import { translateCurrentPage } from './engine/translator';
 import { getLanguage, subscribeLanguage, t } from './engine/i18n';
-import { addBrowsingHistory, clearAllBrowsingHistory } from './engine/history';
+import {
+  addBrowsingHistory,
+  clearAllBrowsingHistory,
+  clearBrowsingHistorySince,
+} from './engine/history';
+import { clearVaultPin } from './engine/vault';
 import { isUrlBookmarked, toggleBookmark } from './engine/bookmarks';
 
 const createDefaultTab = (id?: string, isIncognito?: boolean): Tab => ({
@@ -164,8 +189,79 @@ export default function App() {
   const [activeMedia, setActiveMedia] = useState<DetectedMedia | null>(null);
   const [isOledDark, setIsOledDark] = useState(getOledDarkStatus());
   const [currentLang, setCurrentLang] = useState(getLanguage);
+  const [energySaverEnabled, setEnergySaverEnabled] = useState<boolean>(getEnergySaverEnabled);
+  const [liveApkStatus, setLiveApkStatus] = useState<ApkReleaseStatus | null>(null);
+  const [liveBlockedCount, setLiveBlockedCount] = useState<number>(() => {
+    const s = getAdblockStats();
+    return s.trackersBlocked + s.adsDestroyed;
+  });
+  const [addToHomeModal, setAddToHomeModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    url: string;
+    isPwaHome: boolean;
+  }>({ isOpen: false, title: '', url: '', isPwaHome: false });
+  const [hasPwaPrompt, setHasPwaPrompt] = useState<boolean>(() => Boolean(getGlobalPwaInstallPrompt()));
 
   const isAndroidShell = React.useMemo(() => isAndroidNativeShell(), []);
+
+  useBrowserEvent(
+    'BLOCKED_STAT_UPDATED',
+    React.useCallback((st) => {
+      setLiveBlockedCount(st.trackersBlocked + st.adsDestroyed);
+    }, [])
+  );
+
+  useBrowserEvent(
+    'PWA_INSTALL_PROMPT_READY',
+    React.useCallback((payload) => {
+      setHasPwaPrompt(payload.available);
+    }, [])
+  );
+
+  // Capture PWA beforeinstallprompt globally for 1-tap Chrome "Add to Home screen / Install app"
+  useEffect(() => {
+    const onBeforeInstall = (e: Event) => {
+      e.preventDefault();
+      setGlobalPwaInstallPrompt(e);
+      setHasPwaPrompt(true);
+    };
+    const onAppInstalled = () => {
+      setGlobalPwaInstallPrompt(null);
+      setHasPwaPrompt(false);
+    };
+    window.addEventListener('beforeinstallprompt', onBeforeInstall);
+    window.addEventListener('appinstalled', onAppInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onBeforeInstall);
+      window.removeEventListener('appinstalled', onAppInstalled);
+    };
+  }, []);
+
+  // Apply & subscribe Energy Saver mode globally (limits background tabs + throttles UI animations)
+  useEffect(() => {
+    applyEnergySaverDomClass(energySaverEnabled);
+    return subscribeEnergySaver(setEnergySaverEnabled);
+  }, [energySaverEnabled]);
+
+  // Keep live APK update status fresh on mount & focus
+  useEffect(() => {
+    const refreshApkStatus = () => {
+      fetchLiveApkReleaseStatus().then((live) => {
+        if (live) {
+          setLiveApkStatus(live);
+          emitBrowserEvent('APK_UPDATE_AVAILABLE', {
+            version: live.version,
+            versionCode: live.versionCode,
+            directApkUrl: live.directApkUrl,
+          });
+        }
+      });
+    };
+    refreshApkStatus();
+    window.addEventListener('focus', refreshApkStatus);
+    return () => window.removeEventListener('focus', refreshApkStatus);
+  }, []);
 
   // Splash Screen Engine & PWA Readiness Lifecycle
   const [isSplashMounted, setIsSplashMounted] = useState(() => !isAndroidNativeShell());
@@ -190,21 +286,54 @@ export default function App() {
     return () => window.clearTimeout(unmountTimer);
   }, [isSplashExiting]);
 
-  // Module M3: Tab Manager Alive Tabs LRU State
+  // Module M3: Tab Manager Alive Tabs LRU State (Strictly constrained to 1 when Energy Saver is active)
   const [aliveTabIds, setAliveTabIds] = useState<string[]>(() => [activeTabId]);
 
   useEffect(() => {
+    const explicitlySleepingIds = new Set(
+      tabs.filter((tabItem) => tabItem.isSleeping).map((tabItem) => tabItem.id)
+    );
     setAliveTabIds((prev) =>
       computeAliveTabIds(
         prev,
         activeTabId,
-        tabs.map((t) => t.id),
-        getMaxAliveTabs()
+        tabs.map((tabItem) => tabItem.id),
+        getMaxAliveTabs(energySaverEnabled),
+        explicitlySleepingIds
       )
     );
-  }, [activeTabId, tabs]);
+  }, [activeTabId, tabs, energySaverEnabled]);
 
-  const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0] || createDefaultTab();
+  const activeTab = tabs.find((tabItem) => tabItem.id === activeTabId) || tabs[0] || createDefaultTab();
+
+  // Emit instant Event Bus notifications whenever tabs or active tab attributes mutate
+  useEffect(() => {
+    const sleepingCount = tabs.filter((t) => Boolean(t.isSleeping)).length;
+    emitBrowserEvent('TABS_UPDATED', {
+      count: tabs.length,
+      activeTabId,
+      sleepingCount,
+    });
+    emitBrowserEvent('ACTIVE_TAB_UPDATED', {
+      tabId: activeTab.id,
+      url: activeTab.url,
+      title: activeTab.title,
+      isLoading: activeTab.isLoading,
+      isDesktopMode: Boolean(activeTab.isDesktopMode),
+      isReadingMode: Boolean(activeTab.isReadingMode),
+      isBookmarked: Boolean(activeTab.isBookmarked || (activeTab.url && isUrlBookmarked(activeTab.url))),
+    });
+  }, [
+    tabs,
+    activeTabId,
+    activeTab.id,
+    activeTab.url,
+    activeTab.title,
+    activeTab.isLoading,
+    activeTab.isDesktopMode,
+    activeTab.isReadingMode,
+    activeTab.isBookmarked,
+  ]);
 
   // Register Service Worker, proxy bridge, DNS pre-warmer, and coordinate splash readiness
   useEffect(() => {
@@ -220,7 +349,10 @@ export default function App() {
       if (!cancelled) dismissSplash();
     }, 900);
 
-    initHighPriorityWarmUp();
+    if (!getEnergySaverEnabled()) {
+      initHighPriorityWarmUp();
+    }
+    refreshDynamicFilterLists().catch(() => {});
     if (!cancelled) {
       setSplashProgress(55);
       setSplashStageLabel(isBn ? 'DNS প্রি-ওয়ার্ম ও ডাউনলোড শিল্ড চালু হচ্ছে...' : 'Warming DNS & download shield...');
@@ -464,10 +596,11 @@ export default function App() {
     setTabs((prev) =>
       prev.map((t) => (t.id === activeTabId ? { ...t, isDesktopMode: nextState } : t))
     );
+    emitBrowserEvent('DESKTOP_MODE_CHANGED', { tabId: activeTabId, isDesktopMode: nextState });
     syncDesktopModeWithAndroid(nextState);
     triggerToast(
       nextState
-        ? '🖥️ Desktop site enabled (1024px viewport scaling)'
+        ? '🖥️ Desktop site enabled (1280px desktop layout)'
         : '📱 Mobile view restored'
     );
   };
@@ -481,6 +614,7 @@ export default function App() {
     setTabs((prev) =>
       prev.map((t) => (t.id === idToUpdate ? { ...t, isReadingMode: nextState } : t))
     );
+    emitBrowserEvent('READING_MODE_CHANGED', { tabId: idToUpdate, isReadingMode: nextState });
     triggerToast(
       nextState
         ? '📖 ক্লিন রিডার মোড চালু হয়েছে — সাইডবার, বিজ্ঞাপন ও ফুটার সরানো হয়েছে'
@@ -488,8 +622,14 @@ export default function App() {
     );
   };
 
-  const handleDownloadPage = () => {
-    triggerToast('✓ Page saved to Omarvio Offline Downloads');
+  const handleDownloadPage = async () => {
+    if (!activeTab.url) {
+      triggerToast('⚠️ অফলাইনে সেভ করার জন্য আগে যেকোনো একটি ওয়েবসাইট খুলুন');
+      return;
+    }
+    triggerToast('📥 ওয়েবপেজ অফলাইন রিডিংয়ের জন্য সংরক্ষণ হচ্ছে...');
+    const result = await saveActiveWebpageOffline(activeTab.title, activeTab.url);
+    triggerToast(result.message);
   };
 
   const handleShare = () => {
@@ -508,9 +648,21 @@ export default function App() {
     cookies: boolean;
     cache: boolean;
     passwords: boolean;
+    timeRange?: 'lastHour' | 'last24' | 'last7' | 'all';
   }) => {
     if (options.history) {
-      clearAllBrowsingHistory();
+      if (!options.timeRange || options.timeRange === 'all') {
+        clearAllBrowsingHistory();
+      } else {
+        const now = Date.now();
+        const deltaMs =
+          options.timeRange === 'lastHour'
+            ? 3600_000
+            : options.timeRange === 'last24'
+            ? 86400_000
+            : 7 * 86400_000;
+        clearBrowsingHistorySince(now - deltaMs);
+      }
     }
     if (options.cache || options.cookies) {
       clearNativeAndroidBrowsingData();
@@ -521,7 +673,153 @@ export default function App() {
         }
       } catch {}
     }
+    if (options.passwords) {
+      clearVaultPin();
+      try {
+        localStorage.removeItem('omarvio_vault_data');
+      } catch {}
+    }
     triggerToast('🗑️ নির্বাচিত হিস্টরি ও ক্যাশ সফলভাবে মুছে দেওয়া হয়েছে');
+  };
+
+  const handleToggleEnergySaver = () => {
+    const next = toggleEnergySaver();
+    if (next) {
+      setTabs((prev) =>
+        prev.map((tab) => {
+          if (tab.id !== activeTabId && tab.url && !tab.isSleeping) {
+            putTabToSleep(tab.id, tab.url, tab.title);
+            return { ...tab, isSleeping: true, isLoading: false };
+          }
+          return tab;
+        })
+      );
+    }
+    triggerToast(
+      next
+        ? '🔋 এনার্জি সেভার চালু — ব্যাকগ্রাউন্ড ট্যাব স্লিপ ও UI অ্যানিমেশন কমানো হয়েছে'
+        : '🚀 নরমাল পাওয়ার মোড চালু হয়েছে'
+    );
+  };
+
+  const handleSleepTab = (tabId: string) => {
+    const target = tabs.find((tabItem) => tabItem.id === tabId);
+    if (!target) return;
+    if (target.url) {
+      putTabToSleep(target.id, target.url, target.title);
+    }
+    setTabs((prev) =>
+      prev.map((tabItem) =>
+        tabItem.id === tabId ? { ...tabItem, isSleeping: true, isLoading: false } : tabItem
+      )
+    );
+    setAliveTabIds((prev) => prev.filter((id) => id !== tabId));
+    triggerToast(`💤 "${target.title || 'Tab'}" স্লিপ করা হয়েছে (RAM ফ্রি)`);
+  };
+
+  const handleWakeTab = (tabId: string) => {
+    wakeSleepingTab(tabId);
+    setTabs((prev) =>
+      prev.map((tabItem) =>
+        tabItem.id === tabId ? { ...tabItem, isSleeping: false } : tabItem
+      )
+    );
+    setAliveTabIds((prev) => (prev.includes(tabId) ? prev : [tabId, ...prev]));
+  };
+
+  const handleSleepAllBackgroundTabs = () => {
+    let sleptCount = 0;
+    setTabs((prev) =>
+      prev.map((tab) => {
+        if (tab.id !== activeTabId && tab.url && !tab.isSleeping) {
+          sleptCount += 1;
+          putTabToSleep(tab.id, tab.url, tab.title);
+          return { ...tab, isSleeping: true, isLoading: false };
+        }
+        return tab;
+      })
+    );
+    setAliveTabIds([activeTabId]);
+    triggerToast(
+      sleptCount > 0
+        ? `💤 ${sleptCount}টি ব্যাকগ্রাউন্ড ট্যাব স্লিপ করে RAM ও ব্যাটারি সাশ্রয় করা হয়েছে`
+        : '💤 সব ব্যাকগ্রাউন্ড ট্যাব ইতিমধ্যেই স্লিপ অবস্থায় আছে'
+    );
+  };
+
+  const handleInstallShortcut = () => {
+    if (!activeTab.url) {
+      setAddToHomeModal({
+        isOpen: true,
+        title: 'OMARVIO BROWSER',
+        url: window.location.origin,
+        isPwaHome: true,
+      });
+      return;
+    }
+    const host = extractSafeHostname(activeTab.url);
+    setAddToHomeModal({
+      isOpen: true,
+      title: (activeTab.title && activeTab.title !== 'New Tab' ? activeTab.title : host).slice(0, 28),
+      url: activeTab.url,
+      isPwaHome: false,
+    });
+  };
+
+  const handleConfirmAddToHomeScreen = async (mode: 'shortcut' | 'pwa') => {
+    const cleanTitle = addToHomeModal.title.trim() || 'Website';
+    const targetUrl = addToHomeModal.url.trim() || window.location.origin;
+
+    if (mode === 'pwa') {
+      const promptEvent = getGlobalPwaInstallPrompt();
+      if (promptEvent && typeof promptEvent.prompt === 'function') {
+        try {
+          promptEvent.prompt();
+          const { outcome } = await promptEvent.userChoice;
+          setGlobalPwaInstallPrompt(null);
+          setAddToHomeModal((prev) => ({ ...prev, isOpen: false }));
+          triggerToast(
+            outcome === 'accepted'
+              ? '📲 OMARVIO PWA আপনার ফোনের হোম স্ক্রিনে ইনস্টল হয়েছে!'
+              : 'PWA ইনস্টল বাতিল করা হয়েছে'
+          );
+          return;
+        } catch {}
+      }
+    }
+
+    // Save to persistent Omarvio Home Shortcuts + pin on Android Phone Launcher if in native APK
+    try {
+      const raw = localStorage.getItem('omarvio_shortcuts_v5');
+      const existing = raw ? JSON.parse(raw) : [];
+      const list = Array.isArray(existing) ? existing : [];
+      if (!addToHomeModal.isPwaHome && !list.some((item: any) => item.url === targetUrl)) {
+        const colors = ['bg-cyan-600', 'bg-blue-600', 'bg-emerald-600', 'bg-indigo-600'];
+        const chosenColor = colors[list.length % colors.length];
+        list.push({
+          id: `shortcut-${Date.now()}`,
+          name: cleanTitle.slice(0, 18),
+          url: targetUrl,
+          colorBg: chosenColor,
+          textColor: 'text-white',
+          letter: cleanTitle.charAt(0).toUpperCase() || 'W',
+        });
+        localStorage.setItem('omarvio_shortcuts_v5', JSON.stringify(list));
+        localStorage.setItem('omarvio_custom_shortcuts', JSON.stringify(list));
+        window.dispatchEvent(new Event('omarvio-shortcuts-updated'));
+        emitBrowserEvent('SHORTCUTS_UPDATED', { count: list.length, latestUrl: targetUrl });
+      }
+    } catch {}
+
+    const pinnedNative = pinWebsiteToAndroidHomeScreen(targetUrl, cleanTitle);
+    setAddToHomeModal((prev) => ({ ...prev, isOpen: false }));
+    if (pinnedNative) {
+      triggerToast(`📲 "${cleanTitle}" ফোনের হোম স্ক্রিন ও ওমারভিও হোমে যুক্ত হয়েছে!`);
+    } else if (addToHomeModal.isPwaHome) {
+      triggerToast('📲 ব্রাউজার মেনু (⋮) থেকে "Add to Home screen" / "Install app" চাপুন');
+    } else {
+      triggerToast(`📲 "${cleanTitle}" ওমারভিও হোম স্ক্রিনে পিন করা হয়েছে!`);
+    }
   };
 
   const handleOpenSearchSuggestions = (initialText = '') => {
@@ -530,6 +828,7 @@ export default function App() {
   };
 
   const handleCloseTab = (tabIdToClose: string) => {
+    clearSleepingTab(tabIdToClose);
     if (tabs.length <= 1) {
       const freshTab = createDefaultTab();
       setTabs([freshTab]);
@@ -537,7 +836,7 @@ export default function App() {
       return;
     }
 
-    const newTabs = tabs.filter((t) => t.id !== tabIdToClose);
+    const newTabs = tabs.filter((tabItem) => tabItem.id !== tabIdToClose);
     setTabs(newTabs);
 
     if (activeTabId === tabIdToClose) {
@@ -547,6 +846,14 @@ export default function App() {
 
   const handleSelectTab = (tabId: string) => {
     markTabSwitchStart();
+    wakeSleepingTab(tabId);
+    setTabs((prev) =>
+      prev.map((tabItem) =>
+        tabItem.id === tabId && tabItem.isSleeping
+          ? { ...tabItem, isSleeping: false }
+          : tabItem
+      )
+    );
     setActiveTabId(tabId);
     setTimeout(() => {
       measureTabSwitchEnd(aliveTabIds.length);
@@ -611,6 +918,7 @@ export default function App() {
     try {
       window.history.pushState({ url: targetUrl, time: Date.now() }, '');
     } catch {}
+    wakeSleepingTab(activeTabId);
     setTabs((prev) =>
       prev.map((tab) => {
         if (tab.id === activeTabId) {
@@ -624,8 +932,9 @@ export default function App() {
             historyIndex: newHistory.length - 1,
             canGoBack: newHistory.length > 1,
             canGoForward: false,
-            isLoading: true,
+            isLoading: Boolean(targetUrl),
             isReadingMode: false,
+            isSleeping: false,
           };
         }
         return tab;
@@ -955,6 +1264,7 @@ export default function App() {
               onNavigate={handleNavigate}
               onOpenLens={() => setIsLensOpen(true)}
               onOpenSearchOverlay={() => handleOpenSearchSuggestions(activeTab.url)}
+              onOpenSiteControls={() => setIsSiteControlsOpen(true)}
             />
           </div>
 
@@ -1001,14 +1311,48 @@ export default function App() {
               <Share2 className="w-4 h-4 text-cyan-300" />
             </button>
 
-            {/* Privacy Shield Badge */}
+            {/* Always-Visible Top Update Button on every release */}
+            {isAndroidShell ? (
+              <button
+                type="button"
+                onClick={() => {
+                  if (!triggerAndroidAppUpdateCheck()) {
+                    window.location.href = liveApkStatus?.directApkUrl || '/api/download-apk?direct=1';
+                  }
+                }}
+                title={`অ্যাপ আপডেট করুন (v${liveApkStatus?.version || '2.0.0.14'})`}
+                className="h-8 px-2 sm:px-2.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 border border-emerald-400/50 text-white font-bold text-[11px] flex items-center gap-1 shadow-sm transition-colors active:scale-95 cursor-pointer shrink-0 touch-manipulation whitespace-nowrap"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">আপডেট</span>
+                <span className="font-mono text-[10px]">v{liveApkStatus?.version || '2.0.0.14'}</span>
+              </button>
+            ) : (
+              <a
+                href={liveApkStatus?.directApkUrl || '/api/download-apk?direct=1'}
+                download="omarvio-browser.apk"
+                title={`নতুন ভার্সন APK ডাউনলোড/আপডেট করুন (v${liveApkStatus?.version || '2.0.0.14'})`}
+                className="h-8 px-2 sm:px-2.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 border border-emerald-400/50 text-white font-bold text-[11px] flex items-center gap-1 shadow-sm transition-colors active:scale-95 cursor-pointer shrink-0 touch-manipulation whitespace-nowrap"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">আপডেট</span>
+                <span className="font-mono text-[10px]">v{liveApkStatus?.version || '2.0.0.14'}</span>
+              </a>
+            )}
+
+            {/* Privacy Shield Badge with Real-Time Blocked Counter */}
             <button
               type="button"
               onClick={() => openSettings('privacy')}
-              title="OMARVIO Privacy Shield (Active - Zero Trackers)"
-              className="w-8 h-8 rounded-lg bg-cyan-950/70 border border-cyan-500/35 flex items-center justify-center text-cyan-300 hover:bg-cyan-900/60 transition-colors active:scale-95 cursor-pointer shrink-0 touch-manipulation"
+              title={`OMARVIO Privacy Shield (${liveBlockedCount} ads & trackers blocked)`}
+              className="h-8 px-2 rounded-lg bg-cyan-950/70 border border-cyan-500/35 flex items-center gap-1 text-cyan-300 hover:bg-cyan-900/60 transition-colors active:scale-95 cursor-pointer shrink-0 touch-manipulation"
             >
               <ShieldCheck className="w-4 h-4 text-cyan-400" />
+              {liveBlockedCount > 0 && (
+                <span className="text-[10px] font-mono font-bold text-cyan-200 tabular-nums">
+                  {liveBlockedCount}
+                </span>
+              )}
             </button>
 
             {/* Tab Counter Badge [N] */}
@@ -1089,7 +1433,7 @@ export default function App() {
           if (!tab.url) return null;
           const isAlive = aliveTabIds.includes(tab.id);
           const isActive = tab.id === activeTabId;
-          const isSleeping = !isAlive;
+          const isSleeping = !isAlive || Boolean(tab.isSleeping);
           return (
             <div
               key={tab.id}
@@ -1112,6 +1456,7 @@ export default function App() {
                 onToggleReadingMode={(next) => handleToggleReadingMode(next, tab.id)}
                 onToast={triggerToast}
                 onShare={handleShare}
+                onWakeTab={() => handleWakeTab(tab.id)}
               />
             </div>
           );
@@ -1155,6 +1500,7 @@ export default function App() {
         onCloseGroup={handleCloseGroup}
         onNewTabInGroup={handleNewTabInGroup}
         onDuplicateTab={handleDuplicateTab}
+        onSleepTab={handleSleepTab}
       />
 
       {/* Chrome Android Authentic 3-Dot Overflow Menu Dropdown */}
@@ -1189,7 +1535,7 @@ export default function App() {
         onFindInPage={() => setIsFindInPageOpen(true)}
         onTranslate={handleTranslateWebPage}
         onToggleReadingMode={() => handleToggleReadingMode()}
-        onInstallShortcut={() => triggerToast('📲 Omarvio Shortcut Created on Device')}
+        onInstallShortcut={handleInstallShortcut}
         onOpenDefaultBrowser={() => setIsDefaultBrowserModalOpen(true)}
         onToggleDesktopSite={handleToggleDesktopSite}
         onCustomizeHome={() => openSettings('general')}
@@ -1204,6 +1550,7 @@ export default function App() {
         tabs={tabs}
         onClose={() => setIsSearchOverlayOpen(false)}
         onNavigate={handleNavigate}
+        onSelectTab={handleSelectTab}
         onNewTabWithQuery={(q) => {
           const targetUrl = q.includes('.')
             ? q.startsWith('http')
@@ -1285,14 +1632,23 @@ export default function App() {
             isOledDark={isOledDark}
             onToggleOledDark={handleToggleOledDark}
             onOpenDownloads={() => {
-            if (!openAndroidDownloadsHub()) {
-              setIsDownloadsOpen(true);
-            }
-          }}
+              if (!openAndroidDownloadsHub()) {
+                setIsDownloadsOpen(true);
+              }
+            }}
             onTranslatePage={handleTranslateWebPage}
             onToast={triggerToast}
             currentUrl={activeTab.url}
             onNavigate={handleNavigate}
+            tabs={tabs}
+            aliveTabIds={aliveTabIds}
+            activeTabId={activeTabId}
+            activeMediaUrl={activeMedia?.src || null}
+            energySaverEnabled={energySaverEnabled}
+            onToggleEnergySaver={handleToggleEnergySaver}
+            onSleepTab={handleSleepTab}
+            onSleepAllBackgroundTabs={handleSleepAllBackgroundTabs}
+            onCloseTab={handleCloseTab}
           />
         )}
 
@@ -1337,6 +1693,71 @@ export default function App() {
           />
         )}
       </React.Suspense>
+
+      {/* Chrome-Style Add to Home Screen / PWA Install Modal */}
+      {addToHomeModal.isOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fadeIn"
+          onClick={() => setAddToHomeModal((prev) => ({ ...prev, isOpen: false }))}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl bg-[#202124] border border-[#3c4043] p-5 shadow-2xl text-slate-100"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center text-white font-black text-lg shadow-lg shrink-0">
+                {(addToHomeModal.title.trim().charAt(0) || 'O').toUpperCase()}
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-base font-bold text-white">Add to Home screen</h3>
+                <p className="text-[11px] text-slate-400 truncate">{addToHomeModal.url}</p>
+              </div>
+            </div>
+
+            <label className="block text-[11px] font-semibold text-slate-400 mb-1.5">
+              শর্টকাট বা অ্যাপের নাম
+            </label>
+            <input
+              type="text"
+              value={addToHomeModal.title}
+              onChange={(e) =>
+                setAddToHomeModal((prev) => ({ ...prev, title: e.target.value }))
+              }
+              maxLength={32}
+              className="w-full px-3 py-2.5 rounded-xl bg-[#28292c] border border-[#3c4043] focus:border-cyan-400 focus:outline-none text-sm text-white mb-4"
+              placeholder="Website name"
+            />
+
+            <div className="flex flex-col gap-2">
+              {hasPwaPrompt && !isAndroidShell && (
+                <button
+                  type="button"
+                  onClick={() => handleConfirmAddToHomeScreen('pwa')}
+                  className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 font-bold text-xs cursor-pointer transition-all active:scale-95"
+                >
+                  Install PWA App (ডাইরেক্ট অ্যাপ ইনস্টল)
+                </button>
+              )}
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setAddToHomeModal((prev) => ({ ...prev, isOpen: false }))}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-300 hover:bg-white/10 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleConfirmAddToHomeScreen('shortcut')}
+                  className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs cursor-pointer transition-all active:scale-95"
+                >
+                  Add (হোম স্ক্রিনে পিন করুন)
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Toast Notification */}
       {showToast && (

@@ -29,7 +29,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
   let manifestRepo = '';
   let manifestApkUrl = '';
   let manifestVersion = '';
-  let manifestVersionCode = 4;
+  let manifestVersionCode = 14;
   let manifestSha256 = '71ab9e0fe1b43e3c20bcf92d1bd6e4c95dce6969584d2dbdf4c04433866fd766';
   if (env.ASSETS) {
     try {
@@ -72,7 +72,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
       githubRepo: envRepo,
       workflowFile: '.github/workflows/build-apk.yml',
       packageName: 'com.omarvio.browser',
-      version: manifestVersion || '2.0.0.4',
+      version: manifestVersion || '2.0.0.14',
       versionCode: manifestVersionCode,
       sha256: manifestSha256,
     }),
