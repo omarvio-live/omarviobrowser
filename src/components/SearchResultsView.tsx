@@ -36,10 +36,15 @@ import {
   Play,
   Maximize2,
   FileDown,
+  Sparkles,
+  Bot,
+  ChevronUp,
+  AlertCircle,
 } from 'lucide-react';
 import { SearchResultItem } from '../engine/search/types';
 import { SEARCH_ENGINES, SearchEngineOption, SearchEngineSelectorModal } from './SearchEngineSelectorModal';
 import { downloadFileInApp } from '../engine/inAppDownloader';
+import { runOmarvioAiChat, getSavedAiSettings } from '../engine/aiClient';
 
 interface SearchResultsViewProps {
   query: string;
@@ -103,6 +108,14 @@ export const SearchResultsView: React.FC<SearchResultsViewProps> = ({
 
   // In-app Video Theater player state
   const [theaterVideo, setTheaterVideo] = useState<{ id: string; title: string; url: string } | null>(null);
+
+  // Live Gemini AI Search Summary state
+  const [aiSummary, setAiSummary] = useState<string>('');
+  const [aiSummaryModel, setAiSummaryModel] = useState<string>('');
+  const [aiSummaryLoading, setAiSummaryLoading] = useState<boolean>(false);
+  const [aiSummaryError, setAiSummaryError] = useState<string | null>(null);
+  const [aiSummaryCollapsed, setAiSummaryCollapsed] = useState<boolean>(false);
+  const [aiSummaryNonce, setAiSummaryNonce] = useState<number>(0);
 
   // Toast feedback
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -168,6 +181,53 @@ export const SearchResultsView: React.FC<SearchResultsViewProps> = ({
         setIsLoading(false);
       });
   }, [cleanQ, currentEngineId]);
+
+  // 1b. Live Gemini AI Search Summary (when enabled in AI settings)
+  const aiSettingsSnapshot = getSavedAiSettings();
+  useEffect(() => {
+    if (!cleanQ || isLoading) return;
+    const saved = getSavedAiSettings();
+    if (!saved.searchSummary) {
+      setAiSummary('');
+      setAiSummaryError(null);
+      setAiSummaryLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setAiSummaryLoading(true);
+    setAiSummaryError(null);
+
+    const snippets = results
+      .slice(0, 5)
+      .map((r, i) => `${i + 1}. ${r.title} (${r.displayUrl}): ${r.snippet || ''}`)
+      .join('\n');
+
+    runOmarvioAiChat({
+      prompt: `Search query: "${cleanQ}"\nProvide a concise, factual summary with 3-4 bullet points helping the user understand this topic right away.${snippets ? `\n\nTop search snippets for grounding:\n${snippets}` : ''}`,
+      model: saved.model,
+      reasoningLevel: saved.reasoningLevel,
+      autoTranslateBn: saved.autoTranslateBn,
+      sanitizePrompt: saved.sanitizePrompt,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        setAiSummary(res.text);
+        setAiSummaryModel(res.modelUsed);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setAiSummary('');
+        setAiSummaryError(err instanceof Error ? err.message : 'AI সারসংক্ষেপ তৈরি করা যায়নি।');
+      })
+      .finally(() => {
+        if (!cancelled) setAiSummaryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cleanQ, isLoading, aiSummaryNonce, results]);
 
   // 2. Dynamic Auto-Enrichment when user selects Images or Docs and current results are sparse
   useEffect(() => {
@@ -403,6 +463,79 @@ export const SearchResultsView: React.FC<SearchResultsViewProps> = ({
 
       {/* Main Results Body */}
       <div className="max-w-4xl w-full mx-auto px-3 sm:px-4 py-3 space-y-3">
+        {/* Live Gemini AI Smart Summary Card */}
+        {aiSettingsSnapshot.searchSummary && activeCategory === 'all' && (aiSummaryLoading || aiSummary || aiSummaryError) && (
+          <div className="p-3.5 rounded-2xl bg-gradient-to-br from-[#0e172c] via-[#0c1324] to-[#0a1a24] border border-cyan-500/35 shadow-lg space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-7 h-7 rounded-xl bg-cyan-500/20 border border-cyan-400/40 flex items-center justify-center text-cyan-300 shrink-0">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-bold text-slate-100">OMARVIO AI স্মার্ট সারসংক্ষেপ</span>
+                    {aiSummaryModel && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-950/90 border border-cyan-500/30 text-cyan-300 font-mono truncate">
+                        {aiSummaryModel}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                {!aiSummaryLoading && (
+                  <button
+                    type="button"
+                    onClick={() => setAiSummaryNonce((n) => n + 1)}
+                    title="পুনরায় সারসংক্ষেপ তৈরি করুন"
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800/80 transition-colors cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setAiSummaryCollapsed((v) => !v)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/80 transition-colors cursor-pointer"
+                >
+                  {aiSummaryCollapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            {!aiSummaryCollapsed && (
+              <>
+                {aiSummaryLoading && (
+                  <div className="flex items-center gap-2 text-xs text-cyan-300 py-1">
+                    <Bot className="w-4 h-4 animate-pulse shrink-0" />
+                    <span>Gemini AI এই বিষয়ের মূল তথ্য বিশ্লেষণ করছে...</span>
+                  </div>
+                )}
+                {!aiSummaryLoading && aiSummaryError && (
+                  <div className="flex items-center justify-between gap-2 text-xs text-amber-300 bg-amber-950/40 border border-amber-500/30 rounded-xl px-3 py-2">
+                    <span className="flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>{aiSummaryError}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setAiSummaryNonce((n) => n + 1)}
+                      className="px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 font-bold text-[11px] shrink-0 cursor-pointer"
+                    >
+                      আবার চেষ্টা করুন
+                    </button>
+                  </div>
+                )}
+                {!aiSummaryLoading && !aiSummaryError && aiSummary && (
+                  <div className="text-xs sm:text-[13px] text-slate-200 leading-relaxed whitespace-pre-wrap select-text">
+                    {aiSummary}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
         {/* Skeleton Loading State (< 100ms instant feedback) */}
         {isLoading && results.length === 0 && (
           <div className="space-y-3 pt-2">

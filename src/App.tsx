@@ -51,6 +51,12 @@ import {
   applyEnergySaverDomClass,
 } from './engine/energySaver';
 import {
+  getGpuAccelerationEnabled,
+  toggleGpuAcceleration,
+  subscribeGpuAcceleration,
+  applyGpuAccelerationDomClass,
+} from './engine/gpuAcceleration';
+import {
   isAndroidNativeShell,
   openUrlInNativeAndroid,
   syncDesktopModeWithAndroid,
@@ -164,11 +170,31 @@ export default function App() {
   const [isPanicModalOpen, setIsPanicModalOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(() => {
     if (typeof window !== 'undefined') {
-      return new URLSearchParams(window.location.search).get('openSettings') === '1';
+      const p = new URLSearchParams(window.location.search).get('openSettings');
+      return Boolean(p && p !== '0' && p !== 'false');
     }
     return false;
   });
-  const [settingsTab, setSettingsTab] = useState<SettingsTabId>('general');
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>(() => {
+    if (typeof window !== 'undefined') {
+      const p = new URLSearchParams(window.location.search).get('openSettings');
+      const valid: SettingsTabId[] = [
+        'general',
+        'history',
+        'default-browser',
+        'ai',
+        'privacy',
+        'vault',
+        'feedback',
+        'display',
+        'about',
+      ];
+      if (p && (valid as string[]).includes(p)) {
+        return p as SettingsTabId;
+      }
+    }
+    return 'general';
+  });
 
   const openSettings = (tab: SettingsTabId = 'general') => {
     setSettingsTab(tab);
@@ -190,6 +216,9 @@ export default function App() {
   const [isOledDark, setIsOledDark] = useState(getOledDarkStatus());
   const [currentLang, setCurrentLang] = useState(getLanguage);
   const [energySaverEnabled, setEnergySaverEnabled] = useState<boolean>(getEnergySaverEnabled);
+  const [gpuAccelerationEnabled, setGpuAccelerationEnabled] = useState<boolean>(
+    getGpuAccelerationEnabled
+  );
   const [liveApkStatus, setLiveApkStatus] = useState<ApkReleaseStatus | null>(null);
   const [liveBlockedCount, setLiveBlockedCount] = useState<number>(() => {
     const s = getAdblockStats();
@@ -243,6 +272,12 @@ export default function App() {
     applyEnergySaverDomClass(energySaverEnabled);
     return subscribeEnergySaver(setEnergySaverEnabled);
   }, [energySaverEnabled]);
+
+  // Apply & subscribe GPU Hardware Acceleration globally
+  useEffect(() => {
+    applyGpuAccelerationDomClass(gpuAccelerationEnabled);
+    return subscribeGpuAcceleration(setGpuAccelerationEnabled);
+  }, [gpuAccelerationEnabled]);
 
   // Keep live APK update status fresh on mount & focus
   useEffect(() => {
@@ -699,6 +734,15 @@ export default function App() {
       next
         ? '🔋 এনার্জি সেভার চালু — ব্যাকগ্রাউন্ড ট্যাব স্লিপ ও UI অ্যানিমেশন কমানো হয়েছে'
         : '🚀 নরমাল পাওয়ার মোড চালু হয়েছে'
+    );
+  };
+
+  const handleToggleGpuAcceleration = () => {
+    const next = toggleGpuAcceleration();
+    triggerToast(
+      next
+        ? '⚡ GPU Hardware Acceleration সক্রিয় (will-change: transform চালু)'
+        : 'GPU Hardware Acceleration বন্ধ করা হয়েছে'
     );
   };
 
@@ -1311,35 +1355,6 @@ export default function App() {
               <Share2 className="w-4 h-4 text-cyan-300" />
             </button>
 
-            {/* Always-Visible Top Update Button on every release */}
-            {isAndroidShell ? (
-              <button
-                type="button"
-                onClick={() => {
-                  if (!triggerAndroidAppUpdateCheck()) {
-                    window.location.href = liveApkStatus?.directApkUrl || '/api/download-apk?direct=1';
-                  }
-                }}
-                title={`অ্যাপ আপডেট করুন (v${liveApkStatus?.version || '2.0.0.14'})`}
-                className="h-8 px-2 sm:px-2.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 border border-emerald-400/50 text-white font-bold text-[11px] flex items-center gap-1 shadow-sm transition-colors active:scale-95 cursor-pointer shrink-0 touch-manipulation whitespace-nowrap"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">আপডেট</span>
-                <span className="font-mono text-[10px]">v{liveApkStatus?.version || '2.0.0.14'}</span>
-              </button>
-            ) : (
-              <a
-                href={liveApkStatus?.directApkUrl || '/api/download-apk?direct=1'}
-                download="omarvio-browser.apk"
-                title={`নতুন ভার্সন APK ডাউনলোড/আপডেট করুন (v${liveApkStatus?.version || '2.0.0.14'})`}
-                className="h-8 px-2 sm:px-2.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 border border-emerald-400/50 text-white font-bold text-[11px] flex items-center gap-1 shadow-sm transition-colors active:scale-95 cursor-pointer shrink-0 touch-manipulation whitespace-nowrap"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">আপডেট</span>
-                <span className="font-mono text-[10px]">v{liveApkStatus?.version || '2.0.0.14'}</span>
-              </a>
-            )}
-
             {/* Privacy Shield Badge with Real-Time Blocked Counter */}
             <button
               type="button"
@@ -1408,8 +1423,8 @@ export default function App() {
 
       {/* Main Browser Viewport with Floating Media Bar */}
       <main className="flex-1 relative w-full h-full overflow-hidden bg-[#060913]">
-        {/* Contextual Floating Media Bar when YouTube/Facebook/Video is active */}
-        {activeMedia && (
+        {/* Contextual Floating Media Bar when playable YouTube/Facebook/Video is active */}
+        {activeMedia && activeTab.url && !activeTab.isSleeping && (
           <MediaControllerFloating
             media={activeMedia}
             onClose={() => setActiveMedia(null)}
@@ -1469,14 +1484,10 @@ export default function App() {
           canGoBack={activeTab.canGoBack}
           canGoForward={activeTab.canGoForward}
           isLoading={activeTab.isLoading}
-          tabCount={tabs.length}
           onGoBack={handleGoBack}
           onGoForward={handleGoForward}
           onReload={handleReload}
-          onGoHome={handleGoHome}
-          onOpenTabs={() => setIsTabSwitcherOpen(true)}
           onOpenPanic={() => setIsPanicModalOpen(true)}
-          onOpenMenu={() => setIsChromeMenuOpen(true)}
           onNewTab={handleNewTab}
         />
       ) : null}
@@ -1646,6 +1657,8 @@ export default function App() {
             activeMediaUrl={activeMedia?.src || null}
             energySaverEnabled={energySaverEnabled}
             onToggleEnergySaver={handleToggleEnergySaver}
+            gpuAccelerationEnabled={gpuAccelerationEnabled}
+            onToggleGpuAcceleration={handleToggleGpuAcceleration}
             onSleepTab={handleSleepTab}
             onSleepAllBackgroundTabs={handleSleepAllBackgroundTabs}
             onCloseTab={handleCloseTab}

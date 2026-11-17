@@ -34,7 +34,12 @@ const STORAGE_KEY = 'omarvio_downloads_hub';
 export const detectRunningMedia = (currentUrl: string): DetectedMedia | null => {
   if (!currentUrl) return null;
 
-  if (currentUrl.includes('youtube.com') || currentUrl.includes('youtu.be')) {
+  if (
+    (currentUrl.includes('youtube.com/watch') ||
+      currentUrl.includes('youtube.com/shorts/') ||
+      currentUrl.includes('youtube.com/embed/') ||
+      currentUrl.includes('youtu.be/'))
+  ) {
     return {
       id: `yt-${Date.now()}`,
       type: 'video',
@@ -45,7 +50,11 @@ export const detectRunningMedia = (currentUrl: string): DetectedMedia | null => 
     };
   }
 
-  if (currentUrl.includes('facebook.com') || currentUrl.includes('fb.watch')) {
+  if (
+    currentUrl.includes('fb.watch') ||
+    (currentUrl.includes('facebook.com') &&
+      (currentUrl.includes('/videos/') || currentUrl.includes('/reel/') || currentUrl.includes('/watch')))
+  ) {
     return {
       id: `fb-${Date.now()}`,
       type: 'video',

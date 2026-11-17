@@ -42,6 +42,10 @@ import {
   Activity,
   Power,
   PauseCircle,
+  Bot,
+  Loader2,
+  RotateCcw,
+  AlertCircle,
 } from 'lucide-react';
 import type { Tab } from '../types/browser';
 import {
@@ -104,6 +108,16 @@ import {
   triggerAndroidAppUpdateCheck,
   isAndroidNativeShell,
 } from '../engine/nativeBridge';
+import {
+  runOmarvioAiChat,
+  normalizeActiveAiModelId,
+  AiReasoningLevel,
+} from '../engine/aiClient';
+import {
+  getGpuAccelerationEnabled,
+  toggleGpuAcceleration,
+  subscribeGpuAcceleration,
+} from '../engine/gpuAcceleration';
 
 export type SettingsTabId =
   | 'general'
@@ -128,58 +142,40 @@ export interface AIModelOption {
 
 export const AI_MODELS: AIModelOption[] = [
   {
-    id: 'gemini-2.5-flash',
-    name: 'Gemini 2.5 Flash',
+    id: 'gemini-4-hydrogen',
+    name: 'Gemini 4 Hydrogen',
     developer: 'Google DeepMind',
-    badge: 'ডিফল্ট / অতি দ্রুত',
+    badge: 'ডিফল্ট · ব্যালেন্সড',
     badgeColor: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',
-    desc: 'Ultra-fast multimodal search, smart summaries and low latency browsing.',
-    tagBn: 'সর্বোচ্চ গতির মাল্টিমোডাল সার্চ সারসংক্ষেপ ও তাৎক্ষণিক রিয়েল-টাইম বিশ্লেষণ।',
+    desc: 'Next-generation balanced intelligence for instant search summaries, Q&A, and live webpage analysis.',
+    tagBn: 'সর্বোচ্চ গতির মাল্টিমোডাল সার্চ সারসংক্ষেপ, প্রশ্নোত্তর ও তাৎক্ষণিক পেজ বিশ্লেষণ।',
   },
   {
-    id: 'gemini-2.5-pro',
-    name: 'Gemini 2.5 Pro',
+    id: 'gemini-4-hydrogen-deep',
+    name: 'Gemini 4 Deep Thinking',
     developer: 'Google DeepMind',
     badge: 'গভীর রিজনিং',
     badgeColor: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30',
-    desc: 'Advanced problem solving, intricate code inspection, and detailed answers.',
-    tagBn: 'জটিল প্রোগ্রামিং সমস্যা, গভীর যৌক্তিক অনুসন্ধান ও বৃহৎ ডকুমেন্ট বিশ্লেষণ।',
+    desc: 'High reasoning depth for complex code inspection, mathematics, and structured research.',
+    tagBn: 'জটিল প্রোগ্রামিং, গণিত ও গভীর যৌক্তিক ডকুমেন্ট গবেষণার জন্য হাই-থিংকিং মোড।',
   },
   {
-    id: 'deepseek-r1',
-    name: 'DeepSeek R1 / V3',
-    developer: 'DeepSeek AI',
-    badge: 'ওপেন রিজনিং',
-    badgeColor: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
-    desc: 'Pure mathematical logic, verified chain-of-thought, and precise coding.',
-    tagBn: 'শক্তিশালী গাণিতিক হিসাব এবং উচ্চমাত্রার যৌক্তিক চেইন-অব-থট সমাধান।',
-  },
-  {
-    id: 'claude-3.7-sonnet',
-    name: 'Claude 3.7 Sonnet',
-    developer: 'Anthropic',
-    badge: 'সাহিত্য ও কোড',
-    badgeColor: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
-    desc: 'Exceptional contextual writing, nuance detection, and clean software architecture.',
-    tagBn: 'অত্যন্ত মার্জিত ভাষা শৈলী, সূক্ষ্ম ব্যাকরণ এবং নির্ভুল সফটওয়্যার বিশ্লেষণ।',
-  },
-  {
-    id: 'chatgpt-gpt-4o',
-    name: 'ChatGPT (GPT-4o)',
-    developer: 'OpenAI',
-    badge: 'বহুমুখী কনভারসেশন',
+    id: 'gemini-3.1-flash-lite',
+    name: 'Gemini 3.1 Flash-Lite',
+    developer: 'Google DeepMind',
+    badge: 'অতি দ্রুত ও হালকা',
     badgeColor: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
-    desc: 'Dynamic conversational agility, smart brainstorming, and general intelligence.',
-    tagBn: 'স্মার্ট কথোপকথন, সৃজনশীল পরিকল্পনা ও দ্রুত বহুভাষিক তথ্যের সমাহার।',
+    desc: 'Ultra-low latency lightweight model for instant Bengali translation and quick digests.',
+    tagBn: 'সবচেয়ে কম ডেটা ও তাৎক্ষণিক বাংলা ভাবানুবাদ এবং দ্রুত উত্তর দেওয়ার জন্য।',
   },
   {
-    id: 'llama-3.3-70b',
-    name: 'Llama 3.3 70B',
-    developer: 'Meta Open Source',
-    badge: 'প্রাইভেট ওপেন সোর্স',
-    badgeColor: 'bg-purple-500/20 text-purple-300 border-purple-500/30',
-    desc: 'Independent open-weights model, zero corporate lock-in, client-side isolation.',
-    tagBn: 'উন্মুক্ত স্বাধীন বুদ্ধিমত্তা যা সম্পূর্ণ ডেটা নিরাপত্তা নিশ্চিত করে।',
+    id: 'gemini-4-bangla',
+    name: 'Gemini 4 বাংলা প্রো',
+    developer: 'Google DeepMind · বাংলা ফোকাসড',
+    badge: 'বাংলা স্পেশালিস্ট',
+    badgeColor: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
+    desc: 'Natural, idiomatic Bengali explanations, summarization, and structured writing.',
+    tagBn: 'সহজ, প্রমিত ও সাবলীল বাংলায় যেকোনো বিষয় ব্যাখ্যা, লেখা ও অনুবাদের জন্য।',
   },
 ];
 
@@ -242,6 +238,8 @@ interface SettingsDrawerProps {
   activeMediaUrl?: string | null;
   energySaverEnabled?: boolean;
   onToggleEnergySaver?: () => void;
+  gpuAccelerationEnabled?: boolean;
+  onToggleGpuAcceleration?: () => void;
   onSleepTab?: (tabId: string) => void;
   onSleepAllBackgroundTabs?: () => void;
   onCloseTab?: (tabId: string) => void;
@@ -264,6 +262,8 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   activeMediaUrl = null,
   energySaverEnabled = false,
   onToggleEnergySaver,
+  gpuAccelerationEnabled,
+  onToggleGpuAcceleration,
   onSleepTab,
   onSleepAllBackgroundTabs,
   onCloseTab,
@@ -272,6 +272,13 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   const [currentLang, setCurrentLangState] = useState<LanguageCode>(getLanguage);
   const [apkStatus, setApkStatus] = useState<ApkReleaseStatus | null>(null);
   const [memorySnapshot, setMemorySnapshot] = useState<ProcessMemorySnapshot | null>(null);
+  const [localGpuEnabled, setLocalGpuEnabled] = useState<boolean>(getGpuAccelerationEnabled);
+
+  useEffect(() => {
+    return subscribeGpuAcceleration(setLocalGpuEnabled);
+  }, []);
+
+  const isGpuAccelerated = gpuAccelerationEnabled ?? localGpuEnabled;
 
   // Sync activeTab whenever the drawer opens or initialTab changes
   useEffect(() => {
@@ -331,12 +338,12 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
     }
   });
 
-  // AI Model State
+  // AI Model & Live Interactive Assistant State
   const [selectedAIModel, setSelectedAIModel] = useState<string>(() => {
     try {
-      return localStorage.getItem('omarvio_ai_model') || 'gemini-2.5-flash';
+      return normalizeActiveAiModelId(localStorage.getItem('omarvio_ai_model'));
     } catch {
-      return 'gemini-2.5-flash';
+      return 'gemini-4-hydrogen';
     }
   });
   const [aiSearchSummary, setAiSearchSummary] = useState<boolean>(() => {
@@ -355,12 +362,12 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
       return true;
     }
   });
-  const [aiTemperature, setAiTemperature] = useState<number>(() => {
+  const [aiReasoningLevel, setAiReasoningLevel] = useState<AiReasoningLevel>(() => {
     try {
-      const v = localStorage.getItem('omarvio_ai_temperature');
-      return v !== null ? parseFloat(v) : 0.7;
+      const v = localStorage.getItem('omarvio_ai_reasoning_level');
+      return v === 'LOW' || v === 'HIGH' ? v : 'MEDIUM';
     } catch {
-      return 0.7;
+      return 'MEDIUM';
     }
   });
   const [aiAutoTranslateBn, setAiAutoTranslateBn] = useState<boolean>(() => {
@@ -371,6 +378,11 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
       return true;
     }
   });
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiResponse, setAiResponse] = useState('');
+  const [aiResponseModel, setAiResponseModel] = useState('');
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [isAiRunning, setIsAiRunning] = useState(false);
 
   // Privacy Shields (Persisted in Local Storage)
   const [linkClinicActive, setLinkClinicActive] = useState<boolean>(() => {
@@ -584,12 +596,83 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   };
 
   const handleSelectAIModel = (modelId: string) => {
-    setSelectedAIModel(modelId);
+    const normalized = normalizeActiveAiModelId(modelId);
+    setSelectedAIModel(normalized);
     try {
-      localStorage.setItem('omarvio_ai_model', modelId);
+      localStorage.setItem('omarvio_ai_model', normalized);
     } catch {}
-    const model = AI_MODELS.find((m) => m.id === modelId);
-    onToast(`🤖 সক্রিয় AI মডেল: ${model?.name || modelId}`);
+    const model = AI_MODELS.find((m) => m.id === normalized);
+    onToast(`🤖 সক্রিয় AI মডেল: ${model?.name || normalized}`);
+  };
+
+  const handleRunAiPrompt = async (customPrompt?: string) => {
+    const text = (customPrompt ?? aiPrompt).trim();
+    if (!text) {
+      onToast('⚠️ অনুগ্রহ করে একটি প্রশ্ন বা নির্দেশনা লিখুন');
+      return;
+    }
+    setIsAiRunning(true);
+    setAiError(null);
+    try {
+      const result = await runOmarvioAiChat({
+        prompt: text,
+        model: selectedAIModel,
+        reasoningLevel: aiReasoningLevel,
+        autoTranslateBn: aiAutoTranslateBn,
+        sanitizePrompt: aiPromptSanitizer,
+      });
+      setAiResponse(result.text);
+      setAiResponseModel(result.modelUsed);
+    } catch (err) {
+      setAiResponse('');
+      setAiError(err instanceof Error ? err.message : 'AI মডেল থেকে উত্তর পাওয়া যায়নি।');
+    } finally {
+      setIsAiRunning(false);
+    }
+  };
+
+  const handleSummarizeActivePage = async () => {
+    if (!currentUrl) {
+      onToast('⚠️ সামারাইজ করার জন্য আগে যেকোনো একটি ওয়েবসাইট ওপেন করুন');
+      return;
+    }
+    setIsAiRunning(true);
+    setAiError(null);
+    try {
+      let pageContext = '';
+      let pageTitle = currentUrl;
+      try {
+        const res = await fetch(`/api/proxy?url=${encodeURIComponent(currentUrl)}&reader=1`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.title) pageTitle = String(data.title);
+          if (data?.content) {
+            pageContext = String(data.content)
+              .replace(/<[^>]+>/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 7000);
+          }
+        }
+      } catch {}
+
+      const result = await runOmarvioAiChat({
+        prompt: `Summarize the key points of this webpage ("${pageTitle}") in concise bullet points for the user.`,
+        model: selectedAIModel,
+        reasoningLevel: aiReasoningLevel,
+        autoTranslateBn: aiAutoTranslateBn,
+        sanitizePrompt: aiPromptSanitizer,
+        pageContext: pageContext || undefined,
+        pageUrl: currentUrl,
+      });
+      setAiResponse(result.text);
+      setAiResponseModel(result.modelUsed);
+    } catch (err) {
+      setAiResponse('');
+      setAiError(err instanceof Error ? err.message : 'পেজ সামারাইজ করা যায়নি।');
+    } finally {
+      setIsAiRunning(false);
+    }
   };
 
   const handleClearCache = async () => {
@@ -709,7 +792,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
       return;
     }
 
-    const currentModelName = AI_MODELS.find((m) => m.id === selectedAIModel)?.name || 'Gemini 2.5 Flash';
+    const currentModelName = AI_MODELS.find((m) => m.id === selectedAIModel)?.name || 'Gemini 4 Hydrogen';
     const categoryLabels: Record<string, string> = {
       bug: 'Bug Report / বাগ বা ত্রুটি',
       feature: 'Feature Request / নতুন ফিচারের প্রস্তাব',
@@ -843,6 +926,50 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                 <p className="text-xs font-bold text-cyan-200 italic leading-snug">
                   {t('slogan')}
                 </p>
+              </div>
+
+              {/* ========================================================= */}
+              {/* PERMANENT IN-SETTINGS APP UPDATE HUB (Moved out of Top Bar) */}
+              {/* ========================================================= */}
+              <div className="p-3.5 rounded-2xl bg-gradient-to-r from-emerald-950/60 to-teal-950/50 border border-emerald-500/35 space-y-2.5 shadow-md">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-bold text-emerald-100 flex items-center gap-1.5">
+                      <Download className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>অ্যাপ আপডেট ও ইনস্টল (App Updates)</span>
+                    </p>
+                    <p className="text-[10px] text-emerald-300/80 mt-0.5">
+                      সর্বশেষ ভার্সন: v{liveVersion} · সরাসরি ব্রাউজার থেকেই APK আপডেট করুন
+                    </p>
+                  </div>
+                  <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-emerald-900/70 text-emerald-200 border border-emerald-500/40 shrink-0">
+                    v{liveVersion}
+                  </span>
+                </div>
+
+                {isAndroidNativeShell() ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!triggerAndroidAppUpdateCheck()) {
+                        window.location.href = directApkUrl;
+                      }
+                    }}
+                    className="w-full py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-sm transition-all active:scale-95 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>আপডেট চেক ও ইনস্টল করুন (v{liveVersion})</span>
+                  </button>
+                ) : (
+                  <a
+                    href={directApkUrl}
+                    download="omarvio-browser.apk"
+                    className="w-full py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-sm transition-all active:scale-95 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>সর্বশেষ Android APK ডাউনলোড করুন (v{liveVersion})</span>
+                  </a>
+                )}
               </div>
 
               {/* ========================================================= */}
@@ -1001,6 +1128,50 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                       এই মুহূর্তে কোনো ভারী ওয়েব ট্যাব লোড নেই (০ MB ব্যাকগ্রাউন্ড প্রসেস)
                     </p>
                   )}
+                </div>
+              </div>
+
+              {/* ========================================================= */}
+              {/* GPU HARDWARE ACCELERATION (CSS will-change: transform)     */}
+              {/* ========================================================= */}
+              <div className="p-3.5 rounded-2xl bg-slate-900/90 border border-cyan-500/30 shadow-md">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                      <Cpu className="w-4 h-4 text-cyan-400 shrink-0" />
+                      <span>GPU Hardware Acceleration</span>
+                    </p>
+                    <p className="text-[10px] text-slate-400 leading-tight mt-0.5">
+                      উচ্চ রেজোলিউশন পেজ স্মুথ রেন্ডার করতে BrowserFrame-এ CSS <code className="text-cyan-300 font-mono">will-change: transform</code> সক্রিয় করে
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={isGpuAccelerated}
+                    aria-label="GPU Hardware Acceleration"
+                    onClick={() => {
+                      if (onToggleGpuAcceleration) {
+                        onToggleGpuAcceleration();
+                      } else {
+                        const next = toggleGpuAcceleration();
+                        onToast(
+                          next
+                            ? '⚡ GPU Hardware Acceleration চালু (will-change: transform সক্রিয়)'
+                            : 'GPU Hardware Acceleration বন্ধ করা হয়েছে'
+                        );
+                      }
+                    }}
+                    className={`w-10 h-5 flex items-center rounded-full p-0.5 transition-colors shrink-0 cursor-pointer ${
+                      isGpuAccelerated ? 'bg-cyan-500' : 'bg-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform ${
+                        isGpuAccelerated ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
                 </div>
               </div>
 
@@ -1416,9 +1587,142 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                     {t('aiModelsTitle')}
                   </h3>
                   <p className="text-[11px] text-cyan-300/90 leading-tight">
-                    আপনার পছন্দের শীর্ষস্থানীয় এআই মডেল নির্বাচন করুন ও কাস্টমাইজ করুন।
+                    লাইভ Gemini AI অ্যাসিস্ট্যান্ট ব্যবহার করুন এবং পছন্দের মডেল সেট করুন।
                   </p>
                 </div>
+              </div>
+
+              {/* ========================================================= */}
+              {/* LIVE INTERACTIVE GEMINI AI WORKSPACE                      */}
+              {/* ========================================================= */}
+              <div className="p-3.5 rounded-2xl bg-slate-900/95 border border-cyan-500/35 space-y-3 shadow-lg">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                    <Bot className="w-4 h-4 text-cyan-400 shrink-0" />
+                    <span>লাইভ OMARVIO AI অ্যাসিস্ট্যান্ট</span>
+                  </span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-cyan-950 text-cyan-300 border border-cyan-500/30 font-mono">
+                    {AI_MODELS.find((m) => m.id === selectedAIModel)?.name || selectedAIModel}
+                  </span>
+                </div>
+
+                {/* Quick Action Prompt Chips */}
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    disabled={isAiRunning || !currentUrl}
+                    onClick={handleSummarizeActivePage}
+                    className="px-2.5 py-1 rounded-lg bg-cyan-950/90 hover:bg-cyan-900 disabled:opacity-45 disabled:cursor-not-allowed border border-cyan-500/40 text-cyan-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <Sparkles className="w-3 h-3 text-cyan-400" />
+                    <span>এই পেজ সামারাইজ করুন</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isAiRunning}
+                    onClick={() => {
+                      const q = 'ইন্টারনেটে নিরাপদে ও বিজ্ঞাপন ছাড়া ব্রাউজ করার ৫টি কার্যকর উপায় সহজ বাংলায় বলো।';
+                      setAiPrompt(q);
+                      handleRunAiPrompt(q);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-semibold cursor-pointer transition-colors"
+                  >
+                    প্রাইভেসি টিপস
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isAiRunning}
+                    onClick={() => {
+                      const q = 'আজকের গুরুত্বপূর্ণ টেকনোলজি ট্রেন্ড সংক্ষেপে বুঝিয়ে দাও।';
+                      setAiPrompt(q);
+                      handleRunAiPrompt(q);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-semibold cursor-pointer transition-colors"
+                  >
+                    টেক ট্রেন্ড
+                  </button>
+                </div>
+
+                {/* Prompt Form */}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    handleRunAiPrompt();
+                  }}
+                  className="flex items-center gap-2"
+                >
+                  <input
+                    type="text"
+                    value={aiPrompt}
+                    onChange={(e) => setAiPrompt(e.target.value)}
+                    placeholder="যেকোনো প্রশ্ন লিখুন বা অনুবাদ করতে বলুন..."
+                    className="flex-1 bg-slate-950 border border-slate-700 focus:border-cyan-400 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 outline-none"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isAiRunning || !aiPrompt.trim()}
+                    className="px-3 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 disabled:opacity-50 text-slate-950 font-bold text-xs flex items-center gap-1 cursor-pointer shrink-0 transition-all active:scale-95"
+                  >
+                    {isAiRunning ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Send className="w-3.5 h-3.5" />
+                    )}
+                    <span>জিজ্ঞাসা</span>
+                  </button>
+                </form>
+
+                {/* Live AI Output / Error Box */}
+                {isAiRunning && (
+                  <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center gap-2 text-xs text-cyan-300">
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                    <span>Gemini AI চিন্তা ও বিশ্লেষণ করছে...</span>
+                  </div>
+                )}
+
+                {!isAiRunning && aiError && (
+                  <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-xs text-amber-200 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <span className="leading-relaxed">{aiError}</span>
+                  </div>
+                )}
+
+                {!isAiRunning && !aiError && aiResponse && (
+                  <div className="p-3 rounded-xl bg-slate-950/90 border border-cyan-500/30 space-y-2">
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
+                      <span className="text-[10px] font-mono text-cyan-400">
+                        মডেল: {aiResponseModel || selectedAIModel}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(aiResponse);
+                            onToast('📋 AI উত্তর কপি করা হয়েছে');
+                          }}
+                          className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-cyan-300 cursor-pointer"
+                          title="উত্তর কপি করুন"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAiResponse('');
+                            setAiError(null);
+                          }}
+                          className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-rose-300 cursor-pointer"
+                          title="পরিষ্কার করুন"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="text-xs text-slate-200 leading-relaxed whitespace-pre-wrap select-text max-h-60 overflow-y-auto">
+                      {aiResponse}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Models List */}
@@ -1536,29 +1840,39 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   />
                 </div>
 
-                {/* Temperature Slider */}
-                <div className="p-3 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-1.5">
+                {/* Reasoning Depth Selector (Gemini 4 Thinking Config) */}
+                <div className="p-3 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-2">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="font-bold text-slate-200">AI ক্রিয়েটিভিটি ও রিজনিং ব্যালেন্স:</span>
-                    <span className="text-cyan-400 font-mono font-bold">{aiTemperature}</span>
+                    <span className="font-bold text-slate-200">AI রিজনিং ও বিশ্লেষণ গভীরতা (Thinking Level):</span>
+                    <span className="text-cyan-400 font-mono font-bold">{aiReasoningLevel}</span>
                   </div>
-                  <input
-                    type="range"
-                    min="0.1"
-                    max="1.0"
-                    step="0.1"
-                    value={aiTemperature}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      setAiTemperature(val);
-                      try { localStorage.setItem('omarvio_ai_temperature', String(val)); } catch {}
-                    }}
-                    className="w-full accent-cyan-400 cursor-pointer"
-                  />
-                  <div className="flex justify-between text-[10px] text-slate-500 font-mono">
-                    <span>নির্ভুল যৌক্তিক (0.1)</span>
-                    <span>ভারসাম্যপূর্ণ (0.7)</span>
-                    <span>সৃজনশীল (1.0)</span>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {(
+                      [
+                        { id: 'LOW', label: 'দ্রুত (LOW)' },
+                        { id: 'MEDIUM', label: 'ভারসাম্য (MED)' },
+                        { id: 'HIGH', label: 'গভীর (HIGH)' },
+                      ] as const
+                    ).map((lvl) => (
+                      <button
+                        key={lvl.id}
+                        type="button"
+                        onClick={() => {
+                          setAiReasoningLevel(lvl.id);
+                          try {
+                            localStorage.setItem('omarvio_ai_reasoning_level', lvl.id);
+                          } catch {}
+                          onToast(`⚡ AI থিংকিং লেভেল: ${lvl.label}`);
+                        }}
+                        className={`py-1.5 px-2 rounded-xl text-[11px] font-bold transition-all cursor-pointer border ${
+                          aiReasoningLevel === lvl.id
+                            ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200'
+                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {lvl.label}
+                      </button>
+                    ))}
                   </div>
                 </div>
               </div>

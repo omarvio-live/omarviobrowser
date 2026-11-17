@@ -43,6 +43,9 @@ export interface BrowserEventPayloads {
   ENERGY_SAVER_CHANGED: {
     enabled: boolean;
   };
+  GPU_ACCELERATION_CHANGED: {
+    enabled: boolean;
+  };
   TABS_UPDATED: {
     count: number;
     activeTabId: string;

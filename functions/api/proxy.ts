@@ -344,6 +344,9 @@ export const onRequest: PagesFunction<Env> = async (context) => {
       edgeFetchHeaders['DNT'] = '1';
       edgeFetchHeaders['Sec-GPC'] = '1';
     }
+    if (targetUrl.includes('youtube.com') || targetUrl.includes('youtu.be')) {
+      edgeFetchHeaders['Cookie'] = 'SOCS=CAI; PREF=tz=Asia.Dhaka&f6=40000000';
+    }
 
     const response = await fetch(targetUrl, {
       method: request.method === 'POST' ? 'POST' : 'GET',
@@ -451,20 +454,35 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         const ogTitle =
           (html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1] ||
             html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] ||
-            'YouTube Channel / Page')
+            'YouTube Hub')
             .replace(/ - YouTube$/i, '')
             .replace(/&amp;/g, '&');
         const ogDesc = (html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1] || '').replace(/&amp;/g, '&');
         const ogImg = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1] || '';
 
+        let ytSearchQuery = '';
+        try {
+          ytSearchQuery = new URL(finalUrl).searchParams.get('search_query') || '';
+        } catch {}
+
         const seenVids = new Set<string>();
         const videos: Array<{ id: string; title: string }> = [];
-        const vidRegex = /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"[\s\S]{0,600}?"title"\s*:\s*\{[^}]*?"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g;
-        let m: RegExpExecArray | null;
-        while ((m = vidRegex.exec(html)) !== null && videos.length < 16) {
-          if (!seenVids.has(m[1])) {
-            seenVids.add(m[1]);
-            videos.push({ id: m[1], title: m[2].replace(/\\"/g, '"').replace(/\\u0026/g, '&') });
+        const richPatterns = [
+          /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"[\s\S]{0,900}?"title"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g,
+          /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"[\s\S]{0,900}?"headline"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g,
+          /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"[\s\S]{0,700}?"title"\s*:\s*\{[^}]*?"simpleText"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g,
+          /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"[\s\S]{0,700}?"title"\s*:\s*\{[^}]*?"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g,
+        ];
+        for (const pat of richPatterns) {
+          let rm: RegExpExecArray | null;
+          while ((rm = pat.exec(html)) !== null && videos.length < 20) {
+            if (!seenVids.has(rm[1])) {
+              seenVids.add(rm[1]);
+              videos.push({
+                id: rm[1],
+                title: rm[2].replace(/\\"/g, '"').replace(/\\u0026/g, '&').replace(/\\n/g, ' '),
+              });
+            }
           }
         }
         if (videos.length === 0) {
@@ -498,44 +516,60 @@ export const onRequest: PagesFunction<Env> = async (context) => {
           <html lang="bn">
           <head>
             <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta name="viewport" content="${isDesktopMode ? 'width=1280, initial-scale=1.0, user-scalable=yes' : 'width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes'}">
             <title>${esc(ogTitle)} — OMARVIO YouTube Hub</title>
             <style>
-              body { background: #070913; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 16px; }
-              .wrap { max-width: 720px; margin: 0 auto; }
-              .hero { display: flex; gap: 14px; align-items: center; background: #0e1427; border: 1px solid rgba(56,189,248,0.28); border-radius: 20px; padding: 16px; margin-bottom: 16px; }
-              .avatar { width: 64px; height: 64px; border-radius: 16px; object-fit: cover; background: #000; flex-shrink: 0; }
-              h1 { margin: 0 0 4px; font-size: 18px; color: #fff; }
-              p { margin: 0; font-size: 12px; color: #94a3b8; line-height: 1.5; }
-              .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
-              .btn { flex: 1; min-width: 180px; text-align: center; background: linear-gradient(135deg, #10b981, #06b6d4); color: #020617; font-weight: 800; font-size: 13px; padding: 11px 14px; border-radius: 12px; text-decoration: none; }
-              .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+              * { box-sizing: border-box; }
+              body { background: #070913; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 14px; }
+              .wrap { max-width: 820px; margin: 0 auto; }
+              .topbar { display: flex; align-items: center; gap: 10px; background: #0e1427; border: 1px solid rgba(56,189,248,0.28); border-radius: 18px; padding: 12px 14px; margin-bottom: 12px; }
+              .ytlogo { width: 38px; height: 38px; border-radius: 12px; background: #ef4444; color: #fff; font-weight: 900; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+              .meta { min-width: 0; flex: 1; }
+              h1 { margin: 0 0 2px; font-size: 15px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+              p { margin: 0; font-size: 11px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+              .searchbar { display: flex; gap: 8px; margin-bottom: 14px; }
+              .searchbar input { flex: 1; min-width: 0; background: #0f1629; border: 1px solid #334155; color: #f8fafc; padding: 10px 14px; border-radius: 14px; font-size: 13px; outline: none; }
+              .searchbar input:focus { border-color: #22d3ee; }
+              .searchbar button { background: linear-gradient(135deg, #ef4444, #f97316); color: #fff; border: none; border-radius: 14px; padding: 10px 16px; font-weight: 800; font-size: 13px; cursor: pointer; flex-shrink: 0; }
+              .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+              .btn { flex: 1; min-width: 180px; text-align: center; background: linear-gradient(135deg, #10b981, #06b6d4); color: #020617; font-weight: 800; font-size: 12px; padding: 10px 14px; border-radius: 12px; text-decoration: none; }
+              .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
               .vcard { display: flex; flex-direction: column; background: #0e1220; border: 1px solid #1e293b; border-radius: 16px; overflow: hidden; text-decoration: none; color: inherit; }
               .vcard img { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: #000; }
               .vinfo { padding: 10px 12px; }
-              .vtitle { font-size: 13px; font-weight: 700; color: #f1f5f9; line-height: 1.4; margin-bottom: 4px; }
+              .vtitle { font-size: 13px; font-weight: 700; color: #f1f5f9; line-height: 1.4; margin-bottom: 5px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
               .vmeta { font-size: 11px; color: #38bdf8; font-weight: 600; }
             </style>
           </head>
           <body>
             <div class="wrap">
-              <div class="hero">
-                ${ogImg ? `<img class="avatar" src="${esc(ogImg)}" alt="">` : ''}
-                <div>
-                  <h1>${esc(ogTitle)}</h1>
-                  <p>${esc(ogDesc || finalUrl)}</p>
+              <div class="topbar">
+                ${ogImg ? `<img style="width:38px;height:38px;border-radius:12px;object-fit:cover;flex-shrink:0;" src="${esc(ogImg)}" alt="">` : '<div class="ytlogo">▶</div>'}
+                <div class="meta">
+                  <h1>${esc(ytSearchQuery ? `YouTube: ${ytSearchQuery}` : ogTitle)}</h1>
+                  <p>${esc(ogDesc || 'বিজ্ঞাপনমুক্ত YouTube হাব · যেকোনো ভিডিও সরাসরি প্লে করুন')}</p>
                 </div>
               </div>
+              <form class="searchbar" onsubmit="event.preventDefault(); searchYt();">
+                <input id="ytq" type="text" value="${esc(ytSearchQuery)}" placeholder="YouTube-এ ভিডিও, নাটক বা গান খুঁজুন..." />
+                <button type="submit">খুঁজুন</button>
+              </form>
               <div class="actions">
                 <a class="btn" href="${esc(finalUrl)}" target="_blank" rel="noopener noreferrer">সরাসরি YouTube অ্যাপ / ব্রাউজারে খুলুন (১০০% কাজ করবে)</a>
               </div>
-              ${videos.length > 0 ? `<div class="grid">${videoCardsHtml}</div>` : '<p style="text-align:center;color:#94a3b8;padding:20px 0;">ভিডিও দেখতে উপরের সরাসরি বাটনে ট্যাপ করুন অথবা ভিডিও লিংক সার্চ করুন।</p>'}
+              ${videos.length > 0 ? `<div class="grid">${videoCardsHtml}</div>` : '<p style="text-align:center;color:#94a3b8;padding:24px 0;">ভিডিও খুঁজতে উপরের সার্চ বক্সে নাম লিখুন অথবা সরাসরি বাটনে ট্যাপ করুন।</p>'}
             </div>
             <script>
               try { window.parent.postMessage({ type: 'OMARVIO_PROXY_READY', url: ${JSON.stringify(finalUrl)} }, '*'); } catch(e) {}
               function openYt(id) {
                 var watchUrl = 'https://www.youtube.com/watch?v=' + id;
                 try { window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: watchUrl }, '*'); } catch(e) {}
+              }
+              function searchYt() {
+                var q = (document.getElementById('ytq').value || '').trim();
+                if (!q) return;
+                var dest = 'https://m.youtube.com/results?search_query=' + encodeURIComponent(q);
+                try { window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: dest }, '*'); } catch(e) {}
               }
             </script>
           </body>

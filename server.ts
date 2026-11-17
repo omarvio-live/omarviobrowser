@@ -7,12 +7,14 @@
  * Delivers sub-50ms caching, ad suppression, and in-tab navigation enforcement.
  */
 
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { Readable } from 'stream';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { executeGatewaySearch, fetchSearchSuggestions } from './src/engine/search/searchGateway';
 import { extractReadableArticleFromHtml } from './src/engine/readerExtractor';
 import {
@@ -290,6 +292,9 @@ async function startServer() {
         fetchHeaders['DNT'] = '1';
         fetchHeaders['Sec-GPC'] = '1';
       }
+      if (targetUrl.includes('youtube.com') || targetUrl.includes('youtu.be')) {
+        fetchHeaders['Cookie'] = 'SOCS=CAI; PREF=tz=Asia.Dhaka&f6=40000000';
+      }
 
       const fetchInit: RequestInit = {
         method: req.method === 'POST' ? 'POST' : 'GET',
@@ -335,6 +340,228 @@ async function startServer() {
           return res.status(200).json(extracted);
         }
 
+        const finalHost = (() => {
+          try {
+            return new URL(finalUrl).hostname.toLowerCase();
+          } catch {
+            return '';
+          }
+        })();
+
+        // Smart Hub for YouTube non-embed pages (m.youtube.com, channels, search) & Walled-Garden SPAs
+        const isYouTubePage =
+          finalHost === 'm.youtube.com' ||
+          finalHost === 'www.youtube.com' ||
+          finalHost === 'youtube.com';
+        const isWalledGardenSpa =
+          finalHost.endsWith('facebook.com') ||
+          finalHost.endsWith('instagram.com') ||
+          finalHost.endsWith('tiktok.com') ||
+          finalHost === 'x.com' ||
+          finalHost === 'twitter.com' ||
+          finalHost === 'www.twitter.com';
+
+        if (isYouTubePage && !finalUrl.includes('/embed/')) {
+          const ogTitle =
+            (html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1] ||
+              html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] ||
+              'YouTube Hub')
+              .replace(/ - YouTube$/i, '')
+              .replace(/&amp;/g, '&');
+          const ogDesc = (
+            html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1] || ''
+          ).replace(/&amp;/g, '&');
+          const ogImg =
+            html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1] || '';
+
+          let ytSearchQuery = '';
+          try {
+            const parsedYt = new URL(finalUrl);
+            ytSearchQuery = parsedYt.searchParams.get('search_query') || '';
+          } catch {}
+
+          const seenVids = new Set<string>();
+          const videos: Array<{ id: string; title: string; channel?: string }> = [];
+
+          // Pattern A: YouTube SSR mobile & desktop initial data objects (runs/simpleText/text)
+          const richPatterns = [
+            /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"[\s\S]{0,900}?"title"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g,
+            /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"[\s\S]{0,900}?"headline"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g,
+            /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"[\s\S]{0,700}?"title"\s*:\s*\{[^}]*?"simpleText"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g,
+            /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"[\s\S]{0,700}?"title"\s*:\s*\{[^}]*?"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g,
+          ];
+          for (const pat of richPatterns) {
+            let rm: RegExpExecArray | null;
+            while ((rm = pat.exec(html)) !== null && videos.length < 20) {
+              const vid = rm[1];
+              if (!seenVids.has(vid)) {
+                seenVids.add(vid);
+                videos.push({
+                  id: vid,
+                  title: rm[2]
+                    .replace(/\\"/g, '"')
+                    .replace(/\\u0026/g, '&')
+                    .replace(/\\n/g, ' '),
+                });
+              }
+            }
+          }
+
+          if (videos.length === 0) {
+            const simpleIds = html.matchAll(/"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"/g);
+            for (const sm of simpleIds) {
+              if (!seenVids.has(sm[1]) && videos.length < 12) {
+                seenVids.add(sm[1]);
+                videos.push({ id: sm[1], title: `${ogTitle} — Video` });
+              }
+            }
+          }
+
+          // Live Fallback via Omarvio Search Gateway if datacenter IP received an empty YouTube shell
+          if (videos.length === 0) {
+            try {
+              const qStr = ytSearchQuery
+                ? `site:youtube.com/watch ${ytSearchQuery}`
+                : 'site:youtube.com/watch trending bangladesh music tech news';
+              const gw = await executeGatewaySearch('google', qStr, 1, 'bn');
+              for (const item of gw.results || []) {
+                const ytMatch =
+                  item.url.match(/[?&]v=([a-zA-Z0-9_-]{11})/) ||
+                  item.url.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/) ||
+                  item.url.match(/\/shorts\/([a-zA-Z0-9_-]{11})/);
+                if (ytMatch && !seenVids.has(ytMatch[1]) && videos.length < 16) {
+                  seenVids.add(ytMatch[1]);
+                  videos.push({ id: ytMatch[1], title: item.title.replace(/ - YouTube$/i, '') });
+                }
+              }
+            } catch {}
+          }
+
+          const esc = (s: string) =>
+            String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] || c));
+
+          const videoCardsHtml = videos
+            .map(
+              (v) => `
+              <a class="vcard" href="https://www.youtube.com/watch?v=${esc(v.id)}" onclick="event.preventDefault(); openYt('${esc(v.id)}');">
+                <img src="https://i.ytimg.com/vi/${esc(v.id)}/hqdefault.jpg" loading="lazy" alt="">
+                <div class="vinfo">
+                  <div class="vtitle">${esc(v.title)}</div>
+                  <div class="vmeta">▶️ ওমারভিও বিজ্ঞাপনমুক্ত প্লেয়ারে দেখুন</div>
+                </div>
+              </a>`
+            )
+            .join('');
+
+          res.setHeader('Content-Type', 'text/html; charset=utf-8');
+          return res.status(200).send(`<!DOCTYPE html>
+            <html lang="bn">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="${isDesktopMode ? 'width=1280, initial-scale=1.0, user-scalable=yes' : 'width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes'}">
+              <title>${esc(ogTitle)} — OMARVIO YouTube Hub</title>
+              <style>
+                * { box-sizing: border-box; }
+                body { background: #070913; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 14px; }
+                .wrap { max-width: 820px; margin: 0 auto; }
+                .topbar { display: flex; align-items: center; gap: 10px; background: #0e1427; border: 1px solid rgba(56,189,248,0.28); border-radius: 18px; padding: 12px 14px; margin-bottom: 12px; }
+                .ytlogo { width: 38px; height: 38px; border-radius: 12px; background: #ef4444; color: #fff; font-weight: 900; font-size: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+                .meta { min-width: 0; flex: 1; }
+                h1 { margin: 0 0 2px; font-size: 15px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+                p { margin: 0; font-size: 11px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+                .searchbar { display: flex; gap: 8px; margin-bottom: 14px; }
+                .searchbar input { flex: 1; min-width: 0; background: #0f1629; border: 1px solid #334155; color: #f8fafc; padding: 10px 14px; border-radius: 14px; font-size: 13px; outline: none; }
+                .searchbar input:focus { border-color: #22d3ee; }
+                .searchbar button { background: linear-gradient(135deg, #ef4444, #f97316); color: #fff; border: none; border-radius: 14px; padding: 10px 16px; font-weight: 800; font-size: 13px; cursor: pointer; flex-shrink: 0; }
+                .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+                .btn { flex: 1; min-width: 180px; text-align: center; background: linear-gradient(135deg, #10b981, #06b6d4); color: #020617; font-weight: 800; font-size: 12px; padding: 10px 14px; border-radius: 12px; text-decoration: none; }
+                .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+                .vcard { display: flex; flex-direction: column; background: #0e1220; border: 1px solid #1e293b; border-radius: 16px; overflow: hidden; text-decoration: none; color: inherit; transition: border-color 0.2s; }
+                .vcard:hover { border-color: #38bdf8; }
+                .vcard img { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: #000; }
+                .vinfo { padding: 10px 12px; }
+                .vtitle { font-size: 13px; font-weight: 700; color: #f1f5f9; line-height: 1.4; margin-bottom: 5px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+                .vmeta { font-size: 11px; color: #38bdf8; font-weight: 600; }
+              </style>
+            </head>
+            <body>
+              <div class="wrap">
+                <div class="topbar">
+                  ${ogImg ? `<img style="width:38px;height:38px;border-radius:12px;object-fit:cover;flex-shrink:0;" src="${esc(ogImg)}" alt="">` : '<div class="ytlogo">▶</div>'}
+                  <div class="meta">
+                    <h1>${esc(ytSearchQuery ? `YouTube: ${ytSearchQuery}` : ogTitle)}</h1>
+                    <p>${esc(ogDesc || 'বিজ্ঞাপনমুক্ত YouTube হাব · যেকোনো ভিডিও সরাসরি প্লে করুন')}</p>
+                  </div>
+                </div>
+                <form class="searchbar" onsubmit="event.preventDefault(); searchYt();">
+                  <input id="ytq" type="text" value="${esc(ytSearchQuery)}" placeholder="YouTube-এ ভিডিও, নাটক বা গান খুঁজুন..." />
+                  <button type="submit">খুঁজুন</button>
+                </form>
+                <div class="actions">
+                  <a class="btn" href="${esc(finalUrl)}" target="_blank" rel="noopener noreferrer">সরাসরি YouTube অ্যাপ / ব্রাউজারে খুলুন (১০০% কাজ করবে)</a>
+                </div>
+                ${videos.length > 0 ? `<div class="grid">${videoCardsHtml}</div>` : '<p style="text-align:center;color:#94a3b8;padding:24px 0;">ভিডিও খুঁজতে উপরের সার্চ বক্সে নাম লিখুন অথবা সরাসরি বাটনে ট্যাপ করুন।</p>'}
+              </div>
+              <script>
+                try { window.parent.postMessage({ type: 'OMARVIO_PROXY_READY', url: ${JSON.stringify(finalUrl)} }, '*'); } catch(e) {}
+                function openYt(id) {
+                  var watchUrl = 'https://www.youtube.com/watch?v=' + id;
+                  try { window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: watchUrl }, '*'); } catch(e) {}
+                }
+                function searchYt() {
+                  var q = (document.getElementById('ytq').value || '').trim();
+                  if (!q) return;
+                  var dest = 'https://m.youtube.com/results?search_query=' + encodeURIComponent(q);
+                  try { window.parent.postMessage({ type: 'OMARVIO_NAVIGATE', url: dest }, '*'); } catch(e) {}
+                }
+              </script>
+            </body>
+            </html>`);
+        }
+
+        if (isWalledGardenSpa) {
+          const ogTitle =
+            (html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1] ||
+              html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] ||
+              finalHost)
+              .replace(/&amp;/g, '&');
+          const ogDesc = (
+            html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1] || ''
+          ).replace(/&amp;/g, '&');
+          const ogImg =
+            html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1] || '';
+          const esc = (s: string) =>
+            String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] || c));
+          res.setHeader('Content-Type', 'text/html; charset=utf-8');
+          return res.status(200).send(`<!DOCTYPE html>
+            <html lang="bn">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>${esc(ogTitle)}</title>
+              <style>
+                body { background: #070a14; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; text-align: center; }
+                .card { max-width: 460px; width: 100%; background: #0d1226; border: 1px solid rgba(6,182,212,0.35); border-radius: 24px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.65); }
+                .thumb { width: 100%; max-height: 190px; object-fit: cover; border-radius: 14px; margin-bottom: 14px; background: #000; }
+                h2 { margin: 0 0 8px; font-size: 18px; font-weight: 800; color: #f8fafc; }
+                p { font-size: 13px; color: #94a3b8; line-height: 1.55; margin: 0 0 18px; }
+                .btn { display: block; width: 100%; box-sizing: border-box; background: linear-gradient(135deg, #10b981, #06b6d4); color: #020617; font-weight: 800; font-size: 13px; padding: 12px 18px; border-radius: 14px; text-decoration: none; margin-bottom: 10px; }
+                .btn-sec { background: #1e293b; color: #cbd5e1; border: 1px solid #334155; }
+              </style>
+            </head>
+            <body>
+              <div class="card">
+                ${ogImg ? `<img class="thumb" src="${esc(ogImg)}" alt="">` : ''}
+                <h2>${esc(ogTitle)}</h2>
+                <p>${esc(ogDesc || 'নিরাপত্তা ও লগইন সেশনের জন্য এই সোশ্যাল সাইটটি সরাসরি আপনার ব্রাউজার বা ওমারভিও নেটিভ অ্যাপে ওপেন করাই সবচেয়ে দ্রুত ও নির্ভরযোগ্য।')}</p>
+                <a class="btn" href="${esc(finalUrl)}" target="_blank" rel="noopener noreferrer">সরাসরি ওপেন করুন (১০০% কাজ করবে)</a>
+                <a class="btn btn-sec" href="/api/download-apk" target="_blank" rel="noopener">অ্যান্ড্রয়েড নেটিভ APK ডাউনলোড করুন</a>
+              </div>
+              <script>try { window.parent.postMessage({ type: 'OMARVIO_PROXY_READY', url: ${JSON.stringify(finalUrl)} }, '*'); } catch(e) {}</script>
+            </body>
+            </html>`);
+        }
+
         // Detect strict bot-protection / Cloudflare / WAF blocks (403/401/429/503) so user never hits a broken error
         const isBotChallenge =
           response.status === 403 ||
@@ -372,6 +599,7 @@ async function startServer() {
                 <a class="btn" href="${finalUrl}" target="_blank" rel="noopener noreferrer">সরাসরি ওপেন করুন (১০০% কাজ করবে)</a>
                 <a class="btn btn-sec" href="/api/download-apk" target="_blank" rel="noopener">অ্যান্ড্রয়েড নেটিভ APK ইনস্টল করুন (সব সাইট অটো চলে)</a>
               </div>
+              <script>try { window.parent.postMessage({ type: 'OMARVIO_PROXY_READY', url: ${JSON.stringify(finalUrl)} }, '*'); } catch(e) {}</script>
             </body>
             </html>
           `);
@@ -437,6 +665,13 @@ async function startServer() {
               var speculativeUrl = null;
               var privacyFlags = '${privacyFlagsQuery}';
               var expectedViewport = '${enforcedViewportContent}';
+
+              // Signal parent viewport immediately that proxy content loaded cleanly
+              try {
+                if (window.parent && window.parent !== window) {
+                  window.parent.postMessage({ type: 'OMARVIO_PROXY_READY', url: ${JSON.stringify(finalUrl)} }, '*');
+                }
+              } catch(e) {}
 
               // 0. Force viewport meta override & lock initial-scale=1.0 against external SPA overrides (YouTube/Facebook)
               function enforceViewportOverride() {
@@ -1219,6 +1454,158 @@ async function startServer() {
       uptime: process.uptime(),
       timestamp: Date.now(),
     });
+  });
+
+  // =========================================================================
+  // ROUTE 4B: SERVER-SIDE GEMINI AI ASSISTANT & SUMMARIZER (/api/ai/chat)
+  // =========================================================================
+  app.post('/api/ai/chat', async (req, res) => {
+    try {
+      const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+      if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+        return res.status(503).json({
+          error:
+            'GEMINI_API_KEY কনফিগার করা নেই। AI Studio Secrets বা .env ফাইলে GEMINI_API_KEY সেট করুন।',
+        });
+      }
+
+      const body = req.body || {};
+      const rawPrompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+      if (!rawPrompt) {
+        return res.status(400).json({ error: 'অনুগ্রহ করে একটি প্রশ্ন বা প্রম্পট লিখুন।' });
+      }
+
+      const requestedModel = typeof body.model === 'string' ? body.model.trim() : 'gemini-4-hydrogen';
+      const reasoningLevel =
+        typeof body.reasoningLevel === 'string' ? body.reasoningLevel.toUpperCase() : 'MEDIUM';
+      const autoTranslateBn = body.autoTranslateBn !== false;
+      const pageContext =
+        typeof body.pageContext === 'string' ? body.pageContext.slice(0, 12000) : '';
+      const pageUrl = typeof body.pageUrl === 'string' ? body.pageUrl : '';
+
+      // Map user model preset strictly to valid active free-tier Gemini models
+      let resolvedModel: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite' = 'gemini-4-hydrogen';
+      let thinkingLevel: ThinkingLevel =
+        reasoningLevel === 'HIGH'
+          ? ThinkingLevel.HIGH
+          : reasoningLevel === 'LOW'
+          ? ThinkingLevel.LOW
+          : ThinkingLevel.MEDIUM;
+      let styleInstruction =
+        'You are the built-in AI assistant inside OMARVIO BROWSER. Give clear, concise, accurate answers.';
+
+      if (requestedModel === 'gemini-3.1-flash-lite' || requestedModel === 'llama-3.3-70b') {
+        resolvedModel = 'gemini-3.1-flash-lite';
+        styleInstruction =
+          'You are OMARVIO Ultra-Fast Lite AI. Answer concisely in crisp bullet points.';
+      } else if (
+        requestedModel === 'gemini-4-hydrogen-deep' ||
+        requestedModel === 'gemini-2.5-pro' ||
+        requestedModel === 'deepseek-r1'
+      ) {
+        resolvedModel = 'gemini-4-hydrogen';
+        thinkingLevel = ThinkingLevel.HIGH;
+        styleInstruction =
+          'You are OMARVIO Deep Reasoning AI. Think step-by-step and provide thorough, verified analysis.';
+      } else if (
+        requestedModel === 'gemini-4-bangla' ||
+        requestedModel === 'claude-3.7-sonnet' ||
+        requestedModel === 'chatgpt-gpt-4o'
+      ) {
+        resolvedModel = 'gemini-4-hydrogen';
+        styleInstruction =
+          'You are OMARVIO Bangla & Writing Specialist AI. Craft natural, polished, eloquent explanations.';
+      }
+
+      if (autoTranslateBn) {
+        styleInstruction +=
+          ' Respond primarily in clear, natural Bengali (বাংলা) unless the user explicitly asks for another language.';
+      }
+
+      const combinedPrompt = pageContext
+        ? `Webpage URL: ${pageUrl || 'Active Tab'}\nWebpage Content:\n${pageContext}\n\nUser Request: ${rawPrompt}`
+        : rawPrompt;
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+
+      const config: Record<string, any> = {
+        systemInstruction: styleInstruction,
+      };
+      if (resolvedModel === 'gemini-4-hydrogen') {
+        config.thinkingConfig = { thinkingLevel };
+      }
+
+      let actualModelUsed: string = resolvedModel;
+      let response: any;
+      try {
+        const callPromise = ai.models.generateContent({
+          model: resolvedModel,
+          contents: combinedPrompt,
+          config,
+        });
+        if (resolvedModel === 'gemini-4-hydrogen') {
+          response = await Promise.race([
+            callPromise,
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('503 PRIMARY_TIMEOUT')), 9000)
+            ),
+          ]);
+        } else {
+          response = await callPromise;
+        }
+      } catch (primaryErr: any) {
+        const primaryStatus = Number(primaryErr?.status || 0);
+        const primaryMsg = String(primaryErr?.message || '');
+        const isTransientOverload =
+          resolvedModel === 'gemini-4-hydrogen' &&
+          (primaryStatus === 503 ||
+            primaryStatus === 429 ||
+            primaryMsg.includes('503') ||
+            primaryMsg.includes('PRIMARY_TIMEOUT') ||
+            primaryMsg.includes('UNAVAILABLE') ||
+            primaryMsg.includes('high demand'));
+        if (isTransientOverload) {
+          actualModelUsed = 'gemini-3.1-flash-lite';
+          response = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite',
+            contents: combinedPrompt,
+            config: { systemInstruction: styleInstruction },
+          });
+        } else {
+          throw primaryErr;
+        }
+      }
+
+      const outputText = (response?.text || '').trim();
+      if (!outputText) {
+        return res.status(502).json({
+          error: 'AI মডেল থেকে কোনো উত্তর পাওয়া যায়নি। অনুগ্রহ করে আবার চেষ্টা করুন।',
+        });
+      }
+
+      return res.status(200).json({
+        text: outputText,
+        modelUsed: actualModelUsed,
+        preset: requestedModel,
+      });
+    } catch (err: any) {
+      const status =
+        typeof err?.status === 'number' && err.status >= 400 && err.status < 600
+          ? err.status
+          : 500;
+      let errMsg = String(err?.message || 'AI প্রসেসিংয়ে সার্ভার ত্রুটি ঘটেছে।');
+      try {
+        const parsedErr = JSON.parse(errMsg);
+        if (parsedErr?.error?.message) {
+          errMsg = String(parsedErr.error.message);
+        }
+      } catch {}
+      console.error('[OMARVIO-AI] Gemini error:', errMsg);
+      return res.status(status).json({ error: errMsg });
+    }
   });
 
   // =========================================================================

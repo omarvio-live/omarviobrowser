@@ -35,6 +35,10 @@ import {
   isHttpAllowedForHost,
   PrivacyFilterSettings,
 } from '../engine/adblocker';
+import {
+  getGpuAccelerationEnabled,
+  subscribeGpuAcceleration,
+} from '../engine/gpuAcceleration';
 
 interface BrowserFrameProps {
   url: string;
@@ -103,10 +107,19 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
 
   // Optimistic navigation state to eliminate blank/white screen flicker
   const [isOptimisticNavigating, setIsOptimisticNavigating] = useState(false);
+  const [gpuAccelerationEnabled, setGpuAccelerationEnabled] = useState<boolean>(
+    getGpuAccelerationEnabled
+  );
 
   useEffect(() => {
     return subscribePrivacyFilterSettings((next) => {
       setPrivacySettings(next);
+    });
+  }, []);
+
+  useEffect(() => {
+    return subscribeGpuAcceleration((enabled) => {
+      setGpuAccelerationEnabled(enabled);
     });
   }, []);
 
@@ -705,7 +718,13 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
           try {
             const doc = iframeRef.current.contentDocument;
             if (isProxyFrame && doc) {
-              if (doc.body && doc.body.children.length === 0 && !doc.body.innerText?.trim()) {
+              if (
+                !proxyHandshakeRef.current &&
+                doc.body &&
+                doc.body.children.length === 0 &&
+                !doc.body.innerText?.trim() &&
+                !doc.querySelector('script')
+              ) {
                 setHasError(true);
                 return;
               }
@@ -764,7 +783,7 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
     } catch {
       // If a /api/proxy same-origin frame threw SecurityError on contentWindow.location.href,
       // it means it escaped the proxy or hit a blocked chrome-error:// X-Frame-Options sad-page!
-      if (isProxyFrame && !proxyHandshakeRef.current && !currentYtId) {
+      if (isProxyFrame && !proxyHandshakeRef.current && !currentYtId && !isYouTubeSite) {
         setHasError(true);
       }
     }
@@ -783,7 +802,10 @@ export const BrowserFrame: React.FC<BrowserFrameProps> = ({
   return (
     <div
       ref={containerRef}
-      className="relative w-full h-full bg-[#070913] flex flex-col overflow-hidden touch-pan-y overscroll-contain select-none"
+      data-gpu-acceleration={gpuAccelerationEnabled ? 'enabled' : 'disabled'}
+      className={`relative w-full h-full bg-[#070913] flex flex-col overflow-hidden touch-pan-y overscroll-contain select-none ${
+        gpuAccelerationEnabled ? 'will-change-transform' : 'will-change-auto'
+      }`}
     >
       {/* Top Nano Glowing Progress Bar during instant transitions */}
       {isOptimisticNavigating && !showReaderOverlay && (

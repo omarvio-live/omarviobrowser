@@ -57,7 +57,7 @@ export const MediaControllerFloating: React.FC<MediaControllerFloatingProps> = (
   };
 
   return (
-    <div className="absolute top-2 right-2 sm:right-4 z-40 bg-slate-900/95 border border-cyan-500/40 rounded-2xl p-2.5 shadow-2xl shadow-cyan-950/40 backdrop-blur-md flex items-center gap-2 select-none animate-fadeIn">
+    <div className="absolute bottom-3 left-2 right-2 sm:left-auto sm:right-4 z-40 bg-slate-900/95 border border-cyan-500/40 rounded-2xl p-2.5 shadow-2xl shadow-cyan-950/40 backdrop-blur-md flex items-center justify-between gap-2 select-none animate-fadeIn">
       {/* Media Type Icon */}
       <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-600 to-cyan-600 flex items-center justify-center text-white shrink-0 shadow-sm">
         {pureAudioMode ? <Music className="w-4 h-4 animate-pulse" /> : <Video className="w-4 h-4" />}

@@ -1798,61 +1798,6 @@ fun OmarVioBrowserApp(
                                     )
                                 }
                             }
-                            if (!isHomeVisible) {
-                                IconButton(
-                                    onClick = { internalWebView?.reload() },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Default.Refresh,
-                                        contentDescription = "Reload",
-                                        tint = if (isLoading) Color(0xFF22D3EE) else Color(0xFFE3E3E3),
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            }
-                        }
-
-                        // Persistent Top App Update Pill whenever a newer release exists (always visible even after banner dismiss)
-                        availableUpdate?.let { updateChip ->
-                            Row(
-                                modifier = Modifier
-                                    .height(32.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(Color(0xFF059669))
-                                    .border(1.dp, Color(0xFF34D399).copy(alpha = 0.7f), RoundedCornerShape(10.dp))
-                                    .clickable {
-                                        if (updateChip.isDownloading) {
-                                            refreshDownloadsList()
-                                            showDownloadsModal = true
-                                        } else {
-                                            onDownloadFile(
-                                                updateChip.downloadUrl,
-                                                MOBILE_USER_AGENT,
-                                                "attachment; filename=\"omarvio-browser-v${updateChip.version}.apk\"",
-                                                "application/vnd.android.package-archive",
-                                                true
-                                            )
-                                            availableUpdate = updateChip.copy(isDownloading = true)
-                                        }
-                                    }
-                                    .padding(horizontal = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(3.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.SystemUpdate,
-                                    contentDescription = "Update Available",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(13.dp)
-                                )
-                                Text(
-                                    text = if (updateChip.isDownloading) "ডাউন" else "আপডেট",
-                                    color = Color.White,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
                         }
 
                         // AdBlock & Privacy Shield Counter Badge (Brave/Chrome style)
@@ -2492,8 +2437,8 @@ fun OmarVioBrowserApp(
                             )
                         }
 
-                        IconButton(onClick = { goToHome() }) {
-                            Icon(Icons.Default.Home, contentDescription = "Home", tint = Color(0xFF06B6D4))
+                        IconButton(onClick = { createNewTab(incognito = false) }) {
+                            Icon(Icons.Default.Add, contentDescription = "New Tab", tint = Color(0xFF06B6D4))
                         }
 
                         IconButton(onClick = { internalWebView?.reload() }) {
@@ -2683,6 +2628,10 @@ fun OmarVioBrowserApp(
 
                     HorizontalDivider(color = Color(0xFF3C4043))
 
+                    ChromeMenuRow(Icons.Default.AutoAwesome, "AI অ্যাসিস্ট্যান্ট ও মডেল (Gemini)") {
+                        showChromeMenu = false
+                        goToHome("$CLOUDFLARE_HOME_URL&openSettings=ai")
+                    }
                     ChromeMenuRow(Icons.Default.SystemUpdate, "Check for App Update (v$installedVersion)") {
                         showChromeMenu = false
                         checkRemoteUpdate(manualTrigger = true)
@@ -2940,6 +2889,34 @@ fun OmarVioBrowserApp(
                             .padding(horizontal = 14.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        Text("APP UPDATES & VERSION", color = Color(0xFF34D399), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF064E3B).copy(alpha = 0.55f))
+                                .border(1.dp, Color(0xFF34D399).copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                                .clickable {
+                                    showNativeSettingsModal = false
+                                    checkRemoteUpdate(manualTrigger = true)
+                                }
+                                .padding(horizontal = 12.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = Color(0xFF34D399), modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text("Check & Install App Update", color = Color(0xFFECFDF5), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("বর্তমান সংস্করণ: v$installedVersion ($installedVersionCode)", color = Color(0xFFA7F3D0), fontSize = 11.sp)
+                                }
+                            }
+                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Color(0xFF34D399))
+                        }
+
+                        HorizontalDivider(color = Color(0xFF2D2F34))
                         Text("ENERGY SAVER & MEMORY DASHBOARD", color = Color(0xFF34D399), fontSize = 11.sp, fontWeight = FontWeight.Bold)
 
                         NativeSettingToggleRow(
@@ -3463,32 +3440,7 @@ fun OmarVioBrowserApp(
                         }
 
                         HorizontalDivider(color = Color(0xFF2D2F34))
-                        Text("APP UPDATES, DOWNLOADS & DATA", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(Color(0xFF064E3B).copy(alpha = 0.55f))
-                                .border(1.dp, Color(0xFF34D399).copy(alpha = 0.45f), RoundedCornerShape(14.dp))
-                                .clickable {
-                                    showNativeSettingsModal = false
-                                    checkRemoteUpdate(manualTrigger = true)
-                                }
-                                .padding(horizontal = 12.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = Color(0xFF34D399), modifier = Modifier.size(20.dp))
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column {
-                                    Text("Check & Install App Update", color = Color(0xFFECFDF5), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                                    Text("বর্তমান সংস্করণ: v$installedVersion ($installedVersionCode)", color = Color(0xFFA7F3D0), fontSize = 11.sp)
-                                }
-                            }
-                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Color(0xFF34D399))
-                        }
+                        Text("DOWNLOADS & BROWSING DATA", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
 
                         Row(
                             modifier = Modifier
