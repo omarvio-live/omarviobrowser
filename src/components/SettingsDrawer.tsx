@@ -1038,6 +1038,52 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                         {energySaverEnabled ? '⚡ ইকো থ্রটলিং চালু' : '🚀 নরমাল পাওয়ার'}
                       </span>
                     </div>
+
+                    {/* Battery Health Insight */}
+                    <div className="mt-2 pt-2 border-t border-slate-800/80 space-y-1.5">
+                      <div className="flex items-center justify-between gap-2 text-[11px]">
+                        <span className="text-emerald-300 font-semibold flex items-center gap-1.5">
+                          <Zap className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                          <span>Battery Health ইনসাইট</span>
+                        </span>
+                        <span className="font-mono font-bold text-cyan-300 tabular-nums">
+                          {memorySnapshot.batteryHealth.projectedExtensionLabel} সাশ্রয়
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 text-[10px] tabular-nums">
+                        <div className="p-1.5 rounded-lg bg-slate-900/90 border border-slate-800">
+                          <p className="text-slate-400">স্বাস্থ্য স্কোর</p>
+                          <p className="font-bold text-emerald-300">
+                            {memorySnapshot.batteryHealth.healthScore}/100
+                          </p>
+                        </div>
+                        <div className="p-1.5 rounded-lg bg-slate-900/90 border border-slate-800">
+                          <p className="text-slate-400">ব্যাটারি সেভ</p>
+                          <p className="font-bold text-cyan-300">
+                            {memorySnapshot.batteryHealth.batterySavePercent}%
+                          </p>
+                        </div>
+                        <div className="p-1.5 rounded-lg bg-slate-900/90 border border-slate-800">
+                          <p className="text-slate-400">সেভড RAM</p>
+                          <p className="font-bold text-slate-200">
+                            {memorySnapshot.batteryHealth.estimatedSavedRamMB} MB
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[10px] text-slate-400">
+                        <span className="font-semibold text-slate-300">
+                          {memorySnapshot.batteryHealth.healthGradeBn}
+                        </span>
+                        <span>
+                          {energySaverEnabled ? 'Energy Saver সক্রিয়' : 'Energy Saver বন্ধ'}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-slate-400 leading-relaxed">
+                        {memorySnapshot.batteryHealth.summaryBn}
+                      </p>
+                    </div>
                   </div>
                 )}
 

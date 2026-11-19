@@ -201,36 +201,22 @@ class OmarVioWebViewClient(
                     var sw = Math.min(window.screen.width || 390, window.innerWidth || 390);
                     var scale = Math.max(0.25, Math.min(1.0, (sw > 0 ? sw : 390) / targetW)).toFixed(3);
                     var content = 'width=' + targetW + ', initial-scale=' + scale + ', minimum-scale=0.2, maximum-scale=5.0, user-scalable=yes';
-                    window.__omarvioExpectedViewport = content;
-                    function applyViewport() {
-                        var metas = document.querySelectorAll('meta[name="viewport"], meta[name="VIEWPORT"]');
-                        if (metas.length > 0) {
-                            for (var i = 0; i < metas.length; i++) {
-                                if (i > 0) {
-                                    metas[i].parentNode && metas[i].parentNode.removeChild(metas[i]);
-                                } else if (metas[i].getAttribute('content') !== window.__omarvioExpectedViewport) {
-                                    metas[i].setAttribute('content', window.__omarvioExpectedViewport);
-                                }
-                            }
-                        } else {
-                            var head = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
-                            if (head) {
-                                var m = document.createElement('meta');
-                                m.setAttribute('name', 'viewport');
-                                m.setAttribute('content', window.__omarvioExpectedViewport);
-                                head.insertBefore(m, head.firstChild);
-                            }
+                    var metas = document.querySelectorAll('meta[name="viewport"], meta[name="VIEWPORT"]');
+                    if (metas.length > 0) {
+                        for (var i = 1; i < metas.length; i++) {
+                            if (metas[i].parentNode) metas[i].parentNode.removeChild(metas[i]);
                         }
-                    }
-                    applyViewport();
-                    if (!window.__omarvioViewportObserverInstalled && document.documentElement && typeof MutationObserver !== 'undefined') {
-                        window.__omarvioViewportObserverInstalled = true;
-                        new MutationObserver(function() { applyViewport(); }).observe(document.documentElement, {
-                            childList: true,
-                            subtree: true,
-                            attributes: true,
-                            attributeFilter: ['content', 'name']
-                        });
+                        if (metas[0].getAttribute('content') !== content) {
+                            metas[0].setAttribute('content', content);
+                        }
+                    } else {
+                        var head = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
+                        if (head) {
+                            var m = document.createElement('meta');
+                            m.setAttribute('name', 'viewport');
+                            m.setAttribute('content', content);
+                            head.insertBefore(m, head.firstChild);
+                        }
                     }
                     var cssHost = document.head || document.documentElement;
                     if (cssHost) {
@@ -240,7 +226,8 @@ class OmarVioWebViewClient(
                             st.id = 'omarvio-viewport-css';
                             cssHost.appendChild(st);
                         }
-                        st.textContent = 'html, body { min-width: 1280px !important; -webkit-text-size-adjust: 100% !important; text-size-adjust: 100% !important; }';
+                        var desktopCss = 'html, body { min-width: 1280px !important; -webkit-text-size-adjust: 100% !important; text-size-adjust: 100% !important; }';
+                        if (st.textContent !== desktopCss) st.textContent = desktopCss;
                     }
                 } catch(e) {}
             })();
@@ -250,36 +237,22 @@ class OmarVioWebViewClient(
             (function() {
                 try {
                     var content = 'width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover';
-                    window.__omarvioExpectedViewport = content;
-                    function applyViewport() {
-                        var metas = document.querySelectorAll('meta[name="viewport"], meta[name="VIEWPORT"]');
-                        if (metas.length > 0) {
-                            for (var i = 0; i < metas.length; i++) {
-                                if (i > 0) {
-                                    metas[i].parentNode && metas[i].parentNode.removeChild(metas[i]);
-                                } else if (metas[i].getAttribute('content') !== window.__omarvioExpectedViewport) {
-                                    metas[i].setAttribute('content', window.__omarvioExpectedViewport);
-                                }
-                            }
-                        } else {
-                            var head = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
-                            if (head) {
-                                var m = document.createElement('meta');
-                                m.setAttribute('name', 'viewport');
-                                m.setAttribute('content', window.__omarvioExpectedViewport);
-                                head.insertBefore(m, head.firstChild);
-                            }
+                    var metas = document.querySelectorAll('meta[name="viewport"], meta[name="VIEWPORT"]');
+                    if (metas.length > 0) {
+                        for (var i = 1; i < metas.length; i++) {
+                            if (metas[i].parentNode) metas[i].parentNode.removeChild(metas[i]);
                         }
-                    }
-                    applyViewport();
-                    if (!window.__omarvioViewportObserverInstalled && document.documentElement && typeof MutationObserver !== 'undefined') {
-                        window.__omarvioViewportObserverInstalled = true;
-                        new MutationObserver(function() { applyViewport(); }).observe(document.documentElement, {
-                            childList: true,
-                            subtree: true,
-                            attributes: true,
-                            attributeFilter: ['content', 'name']
-                        });
+                        if (metas[0].getAttribute('content') !== content) {
+                            metas[0].setAttribute('content', content);
+                        }
+                    } else {
+                        var head = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
+                        if (head) {
+                            var m = document.createElement('meta');
+                            m.setAttribute('name', 'viewport');
+                            m.setAttribute('content', content);
+                            head.insertBefore(m, head.firstChild);
+                        }
                     }
                     var cssHost = document.head || document.documentElement;
                     if (cssHost) {
@@ -289,7 +262,8 @@ class OmarVioWebViewClient(
                             st.id = 'omarvio-viewport-css';
                             cssHost.appendChild(st);
                         }
-                        st.textContent = 'html, body { width: 100% !important; max-width: 100vw !important; overflow-x: hidden !important; -webkit-text-size-adjust: 100% !important; text-size-adjust: 100% !important; } img, video, iframe, canvas, svg, table { max-width: 100%; }';
+                        var mobileCss = 'html, body { width: 100% !important; max-width: 100vw !important; overflow-x: hidden !important; -webkit-text-size-adjust: 100% !important; text-size-adjust: 100% !important; } img, video, iframe, canvas, svg, table { max-width: 100%; }';
+                        if (st.textContent !== mobileCss) st.textContent = mobileCss;
                     }
                 } catch(e) {}
             })();
@@ -328,7 +302,8 @@ class OmarVioWebViewClient(
         val css = AdBlockEngine.cosmeticSuppressionCss()
         if (AdBlockEngine.adBlockEnabled && css.isNotEmpty()) {
             val escapedCss = css.replace("'", "\\'")
-            val autoSkipBlock = if (AdBlockEngine.easyListEnabled) {
+            val isYouTube = (url ?: "").lowercase().let { it.contains("youtube.com") || it.contains("youtu.be") }
+            val autoSkipBlock = if (AdBlockEngine.easyListEnabled && isYouTube) {
                 """
                 if (!window.__omarvioAdSkipInstalled) {
                     window.__omarvioAdSkipInstalled = true;
@@ -337,15 +312,17 @@ class OmarVioWebViewClient(
                         try {
                             var skip = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
                             if (skip) skip.click();
-                            var v = document.querySelector('video');
                             var isAd = document.querySelector('.ad-showing, .ytp-ad-player-overlay');
-                            if (v && isAd && !isNaN(v.duration) && v.duration > 0) {
-                                v.currentTime = v.duration - 0.1;
-                                v.playbackRate = 16.0;
-                                v.muted = true;
+                            if (isAd) {
+                                var v = document.querySelector('video');
+                                if (v && !isNaN(v.duration) && v.duration > 0) {
+                                    v.currentTime = v.duration - 0.1;
+                                    v.playbackRate = 16.0;
+                                    v.muted = true;
+                                }
                             }
                         } catch(e) {}
-                    }, 800);
+                    }, 1400);
                 }
                 """.trimIndent()
             } else ""
@@ -360,7 +337,9 @@ class OmarVioWebViewClient(
                                 existing.id = 'omarvio-adblock-css';
                                 document.head.appendChild(existing);
                             }
-                            existing.textContent = '$escapedCss';
+                            if (existing.textContent !== '$escapedCss') {
+                                existing.textContent = '$escapedCss';
+                            }
                         }
                         $autoSkipBlock
                     } catch(e) {}

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Tab } from '../types/browser';
 import {
   X,
@@ -130,6 +130,41 @@ export const TabSwitcherModal: React.FC<TabSwitcherModalProps> = ({
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editingGroupName, setEditingGroupName] = useState('');
+
+  // Auto-collapse inactive Tab Groups when the user switches to a different browser session
+  const lastSessionTabIdRef = useRef<string>(activeTabId);
+
+  useEffect(() => {
+    const activeTabObj = tabs.find((t) => t.id === activeTabId);
+    const activeGroupId = activeTabObj?.groupId || null;
+    const sessionChanged = lastSessionTabIdRef.current !== activeTabId;
+
+    if (sessionChanged || isOpen) {
+      lastSessionTabIdRef.current = activeTabId;
+      setCollapsedGroups((prev) => {
+        const next: Record<string, boolean> = {};
+        let hasChanges = false;
+        const distinctGroupIds = new Set<string>();
+        tabs.forEach((t) => {
+          if (t.groupId) distinctGroupIds.add(t.groupId);
+        });
+
+        distinctGroupIds.forEach((gId) => {
+          if (gId === activeGroupId) {
+            next[gId] = false;
+          } else {
+            // Auto-collapse any group that does not contain the active browser session tab
+            next[gId] = sessionChanged ? true : prev[gId] !== undefined ? prev[gId] : true;
+          }
+          if (next[gId] !== prev[gId]) {
+            hasChanges = true;
+          }
+        });
+
+        return hasChanges ? next : prev;
+      });
+    }
+  }, [activeTabId, isOpen, tabs]);
 
   // Per-tab context menu state
   const [contextMenuTabId, setContextMenuTabId] = useState<string | null>(null);
@@ -626,6 +661,11 @@ export const TabSwitcherModal: React.FC<TabSwitcherModalProps> = ({
                   >
                     {group.tabs.length}
                   </span>
+                  {isCollapsed && (
+                    <span className="text-[10px] text-slate-400 truncate">
+                      · নিষ্ক্রিয় গ্রুপ সংকুচিত
+                    </span>
+                  )}
                 </div>
 
                 {/* Group Actions */}

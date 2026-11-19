@@ -30,6 +30,18 @@ export interface TabEnergyProfile {
   reasonEn: string;
 }
 
+export interface BatteryHealthInsight {
+  sleepingTabsCount: number;
+  estimatedSavedRamMB: number;
+  projectedExtensionMinutes: number;
+  projectedExtensionLabel: string;
+  batterySavePercent: number;
+  energySaverActive: boolean;
+  healthScore: number;
+  healthGradeBn: string;
+  summaryBn: string;
+}
+
 export interface ProcessMemorySnapshot {
   usedHeapMB: number;
   totalHeapMB: number;
@@ -41,6 +53,7 @@ export interface ProcessMemorySnapshot {
   aliveCount: number;
   sleepingCount: number;
   highEnergyCount: number;
+  batteryHealth: BatteryHealthInsight;
   tabProfiles: TabEnergyProfile[];
 }
 
@@ -246,6 +259,49 @@ export function getRealtimeProcessMemorySnapshot(
   const sortedProfiles = [...tabProfiles].sort((a, b) => b.energyScore - a.energyScore);
   const highEnergyCount = sortedProfiles.filter((p) => p.isHighEnergy).length;
 
+  // Projected Battery Health Insight based on sleeping tabs + Energy Saver status
+  const estimatedSavedRamMB =
+    sleepingCount * 54 + (energySaverActive ? Math.max(24, aliveCount * 12) : 0);
+  const perSleepingTabMinutes = energySaverActive ? 12 : 9;
+  const baseThrottleMinutes = energySaverActive ? 18 : 0;
+  const projectedExtensionMinutes = Math.min(
+    180,
+    sleepingCount * perSleepingTabMinutes + baseThrottleMinutes
+  );
+
+  const extHours = Math.floor(projectedExtensionMinutes / 60);
+  const extMins = projectedExtensionMinutes % 60;
+  const projectedExtensionLabel =
+    projectedExtensionMinutes <= 0
+      ? '+0 মি.'
+      : extHours > 0
+      ? `+${extHours} ঘ. ${extMins} মি.`
+      : `+${extMins} মি.`;
+
+  const batterySavePercent = Math.min(
+    48,
+    sleepingCount * 7 + (energySaverActive ? 14 : 0)
+  );
+  const rawScore =
+    68 +
+    (energySaverActive ? 18 : 0) +
+    Math.min(18, sleepingCount * 6) -
+    Math.min(26, highEnergyCount * 8);
+  const healthScore = Math.max(25, Math.min(100, rawScore));
+  const healthGradeBn =
+    healthScore >= 85
+      ? 'চমৎকার (Optimal)'
+      : healthScore >= 65
+      ? 'ভালো (Balanced)'
+      : 'উচ্চ লোড (Heavy Drain)';
+
+  const summaryBn =
+    projectedExtensionMinutes > 0
+      ? `${sleepingCount}টি স্লিপিং ট্যাব ও ${
+          energySaverActive ? 'এনার্জি সেভার' : 'স্ট্যান্ডার্ড মোড'
+        } থেকে ~${estimatedSavedRamMB} MB RAM এবং ${projectedExtensionLabel} অতিরিক্ত ব্যাটারি ব্যাকআপ পাওয়া যাচ্ছে।`
+      : 'অতিরিক্ত ব্যাটারি সেভ করতে ব্যাকগ্রাউন্ড ট্যাব স্লিপ করুন অথবা এনার্জি সেভার চালু করুন।';
+
   return {
     usedHeapMB,
     totalHeapMB,
@@ -257,6 +313,17 @@ export function getRealtimeProcessMemorySnapshot(
     aliveCount,
     sleepingCount,
     highEnergyCount,
+    batteryHealth: {
+      sleepingTabsCount: sleepingCount,
+      estimatedSavedRamMB,
+      projectedExtensionMinutes,
+      projectedExtensionLabel,
+      batterySavePercent,
+      energySaverActive,
+      healthScore,
+      healthGradeBn,
+      summaryBn,
+    },
     tabProfiles: sortedProfiles,
   };
 }

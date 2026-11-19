@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="UTF-8" />
+  <title>OMARVIO BROWSER Desktop</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
+    body { background: #070b16; color: #e2e8f0; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+    .chrome { background: #0f172a; border-bottom: 1px solid #1e293b; height: 92px; padding: 6px 12px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+    .tabs { display: flex; align-items: center; gap: 6px; overflow-x: auto; height: 32px; }
+    .tab { background: #1e293b; border: 1px solid #334155; color: #cbd5e1; border-radius: 10px; padding: 4px 10px; font-size: 12px; display: flex; align-items: center; gap: 8px; cursor: pointer; max-width: 190px; }
+    .tab.active { background: #082f49; border-color: #38bdf8; color: #fff; font-weight: 600; }
+    .tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tab-close { border: none; background: transparent; color: #94a3b8; cursor: pointer; font-size: 13px; line-height: 1; }
+    .tab-close:hover { color: #fb7185; }
+    .btn { border: 1px solid #334155; background: #1e293b; color: #e2e8f0; border-radius: 9px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; }
+    .btn:hover { border-color: #38bdf8; color: #fff; }
+    .btn.on { background: #064e3b; border-color: #10b981; color: #a7f3d0; }
+    .omnibox-row { display: flex; align-items: center; gap: 8px; height: 42px; }
+    .url-input { flex: 1; height: 36px; border-radius: 18px; border: 1px solid #334155; background: #020617; color: #fff; padding: 0 14px; font-size: 13px; outline: none; }
+    .url-input:focus { border-color: #38bdf8; }
+    .home { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; background: radial-gradient(circle at top, #0c1a38 0%, #070b16 65%); }
+    .brand { font-size: 32px; font-weight: 900; color: #38bdf8; letter-spacing: -0.02em; }
+    .tagline { font-size: 13px; color: #94a3b8; margin: 6px 0 22px; }
+    .hero-search { width: 100%; max-width: 560px; display: flex; gap: 8px; background: #fff; border-radius: 28px; padding: 6px 8px 6px 14px; }
+    .hero-search select { border: none; background: #e0f2fe; color: #0284c7; font-weight: 700; border-radius: 16px; padding: 6px 10px; font-size: 12px; outline: none; }
+    .hero-search input { flex: 1; border: none; outline: none; font-size: 14px; color: #0f172a; }
+    .hero-search button { border: none; background: #2563eb; color: #fff; font-weight: 700; border-radius: 22px; padding: 8px 18px; cursor: pointer; }
+    .shortcuts { margin-top: 26px; display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; max-width: 560px; }
+    .shortcut { width: 92px; padding: 10px 6px; border-radius: 14px; background: #111827; border: 1px solid #1f2937; cursor: pointer; font-size: 12px; color: #e2e8f0; }
+    .shortcut:hover { border-color: #38bdf8; }
+  </style>
+</head>
+<body>
+  <div class="chrome">
+    <div class="tabs" id="tabsBar"></div>
+    <div class="omnibox-row">
+      <button class="btn" id="btnBack" title="Back">←</button>
+      <button class="btn" id="btnForward" title="Forward">→</button>
+      <button class="btn" id="btnReload" title="Reload">↻</button>
+      <button class="btn" id="btnHome" title="Home">⌂</button>
+      <input class="url-input" id="urlInput" placeholder="সার্চ করুন বা ওয়েব ঠিকানা লিখুন (Zero-Proxy Direct Chromium)..." />
+      <button class="btn on" id="btnShields">🛡️ Shields</button>
+      <button class="btn" id="btnEnergy">⚡ Eco</button>
+    </div>
+  </div>
+
+  <div class="home" id="homeArea">
+    <div class="brand">OMARVIO BROWSER</div>
+    <p class="tagline">"আমার ফোন, আমার ডেটা – কাউকে দেব না!" · Desktop Native Chromium</p>
+    <div class="hero-search">
+      <select id="engineSelect">
+        <option value="https://search.brave.com/search?q=">Brave</option>
+        <option value="https://www.google.com/search?q=">Google</option>
+        <option value="https://duckduckgo.com/?q=">DuckDuckGo</option>
+      </select>
+      <input id="heroInput" placeholder="গোপনীয় সার্চ বা URL লিখুন..." />
+      <button id="heroGo">যান</button>
+    </div>
+    <div class="shortcuts">
+      <div class="shortcut" data-url="https://www.google.com">Google</div>
+      <div class="shortcut" data-url="https://www.youtube.com">YouTube</div>
+      <div class="shortcut" data-url="https://www.facebook.com">Facebook</div>
+      <div class="shortcut" data-url="https://bn.wikipedia.org">Wikipedia</div>
+      <div class="shortcut" data-url="https://github.com/omarvio-live/omarviobrowser">GitHub Repo</div>
+    </div>
+  </div>
+
+  <script>
+    const api = window.OmarvioDesktop;
+    const tabsBar = document.getElementById('tabsBar');
+    const urlInput = document.getElementById('urlInput');
+    const heroInput = document.getElementById('heroInput');
+    const engineSelect = document.getElementById('engineSelect');
+    const homeArea = document.getElementById('homeArea');
+    const btnShields = document.getElementById('btnShields');
+    const btnEnergy = document.getElementById('btnEnergy');
+
+    function render(state) {
+      homeArea.style.display = state.activeUrl ? 'none' : 'flex';
+      if (document.activeElement !== urlInput) urlInput.value = state.activeUrl || '';
+      btnShields.textContent = state.adBlockEnabled ? `🛡️ ${state.blockedCount}` : '🛡️ Off';
+      btnShields.className = state.adBlockEnabled ? 'btn on' : 'btn';
+      btnEnergy.className = state.energySaverEnabled ? 'btn on' : 'btn';
+
+      tabsBar.innerHTML = '';
+      state.tabs.forEach((t) => {
+        const el = document.createElement('div');
+        el.className = 'tab' + (t.id === state.activeTabId ? ' active' : '');
+        const span = document.createElement('span');
+        span.className = 'tab-title';
+        span.textContent = (t.isSleeping ? '💤 ' : '') + (t.title || 'New Tab');
+        const close = document.createElement('button');
+        close.className = 'tab-close';
+        close.textContent = '×';
+        close.onclick = (e) => { e.stopPropagation(); api.closeTab(t.id); };
+        el.onclick = () => api.switchTab(t.id);
+        el.append(span, close);
+        tabsBar.appendChild(el);
+      });
+      const add = document.createElement('button');
+      add.className = 'btn';
+      add.textContent = '+ ট্যাব';
+      add.onclick = () => api.newTab(false);
+      tabsBar.appendChild(add);
+    }
+
+    urlInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') api.navigate(urlInput.value, engineSelect.value);
+    });
+    heroInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') api.navigate(heroInput.value, engineSelect.value);
+    });
+    document.getElementById('heroGo').onclick = () => api.navigate(heroInput.value, engineSelect.value);
+    document.getElementById('btnBack').onclick = () => api.navAction('back');
+    document.getElementById('btnForward').onclick = () => api.navAction('forward');
+    document.getElementById('btnReload').onclick = () => api.navAction('reload');
+    document.getElementById('btnHome').onclick = () => api.goHome();
+    btnShields.onclick = () => api.toggleShields();
+    btnEnergy.onclick = () => api.toggleEnergySaver();
+    document.querySelectorAll('.shortcut').forEach((card) => {
+      card.onclick = () => api.navigate(card.getAttribute('data-url'), engineSelect.value);
+    });
+
+    api.onState(render);
+    api.getState();
+  </script>
+</body>
+</html>

@@ -1,0 +1,73 @@
+name: Build OmarVio Desktop (Windows & Linux)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag for desktop binaries (e.g. v2.0.15-desktop)'
+        required: false
+        default: 'desktop-latest'
+
+permissions:
+  contents: write
+
+jobs:
+  build-desktop:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+          - os: ubuntu-latest
+            platform: linux
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Desktop Dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Build Windows Installer (.exe)
+        if: matrix.platform == 'win'
+        working-directory: desktop
+        run: npm run build:win
+
+      - name: Build Linux Packages (.AppImage & .deb)
+        if: matrix.platform == 'linux'
+        working-directory: desktop
+        run: npm run build:linux
+
+      - name: Upload Desktop Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omarvio-desktop-${{ matrix.platform }}
+          path: |
+            desktop/dist-desktop/*.exe
+            desktop/dist-desktop/*.AppImage
+            desktop/dist-desktop/*.deb
+
+      - name: Publish Desktop Binaries to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name != '' && startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.event.inputs.release_tag || 'desktop-latest' }}
+          name: "OMARVIO BROWSER Desktop Release"
+          files: |
+            desktop/dist-desktop/*.exe
+            desktop/dist-desktop/*.AppImage
+            desktop/dist-desktop/*.deb
+          draft: false
+          prerelease: false

@@ -379,9 +379,13 @@ object AdBlockEngine {
     )
 
     private fun hostMatchesSet(host: String, set: Collection<String>): Boolean {
+        if (set.isEmpty() || host.isEmpty()) return false
         if (set.contains(host)) return true
-        for (item in set) {
-            if (host.endsWith(".$item")) return true
+        var dotIdx = host.indexOf('.')
+        while (dotIdx != -1) {
+            val parent = host.substring(dotIdx + 1)
+            if (set.contains(parent)) return true
+            dotIdx = host.indexOf('.', dotIdx + 1)
         }
         return false
     }
@@ -398,7 +402,7 @@ object AdBlockEngine {
     }
 
     /**
-     * Inspects a requested URL against all enabled granular block-lists before network execution
+     * Inspects a requested URL against all enabled granular block-lists before network execution (O(1) domain depth lookup)
      */
     fun isAdOrTracker(urlStr: String?): Boolean {
         if (!adBlockEnabled || urlStr.isNullOrBlank()) return false
@@ -407,32 +411,17 @@ object AdBlockEngine {
             val uri = Uri.parse(urlStr)
             val host = uri.host?.lowercase() ?: return false
 
-            if (malwarePhishingEnabled && (hostMatchesSet(host, MALWARE_HOSTS) || hostMatchesSet(host, dynamicMalware))) {
-                _blockedCountFlow.value = blockedCount.incrementAndGet()
-                return true
-            }
-            if (easyListEnabled && (hostMatchesSet(host, EASYLIST_AD_HOSTS) || hostMatchesSet(host, dynamicEasyList))) {
-                _blockedCountFlow.value = blockedCount.incrementAndGet()
-                return true
-            }
-            if (easyPrivacyEnabled && (hostMatchesSet(host, EASYPRIVACY_HOSTS) || hostMatchesSet(host, dynamicEasyPrivacy))) {
-                _blockedCountFlow.value = blockedCount.incrementAndGet()
-                return true
-            }
-            if (privacyBadgerEnabled && (hostMatchesSet(host, PRIVACY_BADGER_HOSTS) || hostMatchesSet(host, dynamicPrivacyBadger))) {
-                _blockedCountFlow.value = blockedCount.incrementAndGet()
-                return true
-            }
-            if (peterLoweEnabled && (hostMatchesSet(host, PETER_LOWE_HOSTS) || hostMatchesSet(host, dynamicPeterLowe))) {
-                _blockedCountFlow.value = blockedCount.incrementAndGet()
-                return true
-            }
+            val blockedByHost =
+                (malwarePhishingEnabled && (hostMatchesSet(host, MALWARE_HOSTS) || hostMatchesSet(host, dynamicMalware))) ||
+                (easyListEnabled && (hostMatchesSet(host, EASYLIST_AD_HOSTS) || hostMatchesSet(host, dynamicEasyList))) ||
+                (easyPrivacyEnabled && (hostMatchesSet(host, EASYPRIVACY_HOSTS) || hostMatchesSet(host, dynamicEasyPrivacy))) ||
+                (privacyBadgerEnabled && (hostMatchesSet(host, PRIVACY_BADGER_HOSTS) || hostMatchesSet(host, dynamicPrivacyBadger))) ||
+                (peterLoweEnabled && (hostMatchesSet(host, PETER_LOWE_HOSTS) || hostMatchesSet(host, dynamicPeterLowe))) ||
+                ((easyPrivacyEnabled || privacyBadgerEnabled) &&
+                    (host == "facebook.com" || host.endsWith(".facebook.com")) &&
+                    uri.path?.startsWith("/tr") == true)
 
-            // Facebook pixel endpoint check
-            if ((easyPrivacyEnabled || privacyBadgerEnabled) &&
-                host.endsWith("facebook.com") &&
-                uri.path?.startsWith("/tr") == true
-            ) {
+            if (blockedByHost) {
                 _blockedCountFlow.value = blockedCount.incrementAndGet()
                 return true
             }

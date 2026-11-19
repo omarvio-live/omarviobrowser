@@ -1,0 +1,48 @@
+{
+  "name": "omarvio-browser-desktop",
+  "version": "2.0.0",
+  "description": "OMARVIO BROWSER — Zero-Tracking, Zero-Proxy Fast Chromium Desktop Browser for Windows & Linux",
+  "main": "main.cjs",
+  "author": "OMARVIO GLOBAL LTD.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win --x64 --publish never",
+    "build:linux": "electron-builder --linux --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.omarvio.browser.desktop",
+    "productName": "OMARVIO BROWSER",
+    "artifactName": "OMARVIO-BROWSER-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "dist-desktop"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "shell.html",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Network;WebBrowser;"
+    }
+  }
+}
